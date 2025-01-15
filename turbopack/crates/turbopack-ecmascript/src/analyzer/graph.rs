@@ -10,6 +10,7 @@ use swc_core::{
     ecma::{
         ast::*,
         atoms::js_word,
+        utils::contains_ident_ref,
         visit::{fields::*, *},
     },
 };
@@ -325,6 +326,14 @@ impl EvalContext {
             PropName::Num(num) => num.value.into(),
             PropName::Computed(ComputedPropName { expr, .. }) => self.eval(expr),
             PropName::BigInt(bigint) => (*bigint.value.clone()).into(),
+        }
+    }
+
+    fn eval_member_prop(&self, prop: &MemberProp) -> Option<JsValue> {
+        match prop {
+            MemberProp::Ident(ident) => Some(ident.sym.clone().into()),
+            MemberProp::Computed(ComputedPropName { expr, .. }) => Some(self.eval(expr)),
+            MemberProp::PrivateName(_) => None,
         }
     }
 
@@ -723,6 +732,17 @@ enum EarlyReturn {
     },
 }
 
+pub fn as_parent_path_skip(
+    ast_path: &AstNodePath<AstParentNodeRef<'_>>,
+    skip: usize,
+) -> Vec<AstParentKind> {
+    ast_path
+        .iter()
+        .take(ast_path.len() - skip)
+        .map(|n| n.kind())
+        .collect()
+}
+
 struct Analyzer<'a> {
     data: &'a mut VarGraph,
 
@@ -863,6 +883,13 @@ impl Analyzer<'_> {
                         let mut ast_path = ast_path
                             .with_guard(AstParentNodeRef::FnExpr(fn_expr, FnExprField::Ident));
                         self.visit_opt_ident(ident, &mut ast_path);
+
+                        // We cannot analyze recursive IIFE
+                        if let Some(ident) = ident {
+                            if contains_ident_ref(&function.body, &ident.to_id()) {
+                                return false;
+                            }
+                        }
                     }
 
                     {
@@ -1796,6 +1823,47 @@ impl VisitAstPath for Analyzer<'_> {
         if let Some((esm_reference_index, export)) =
             self.eval_context.imports.get_binding(&ident.to_id())
         {
+            if export.is_none()
+                && !self
+                    .eval_context
+                    .imports
+                    .should_import_all(esm_reference_index)
+            {
+                // export.is_none() checks for a namespace import.
+
+                // Note: This is optimization that can be applied if we don't need to
+                // import all bindings
+                if let Some(AstParentNodeRef::MemberExpr(member, MemberExprField::Obj)) =
+                    ast_path.get(ast_path.len() - 2)
+                {
+                    // Skip if it's on the LHS of assignment
+                    let is_lhs = matches!(
+                        ast_path.get(ast_path.len() - 3),
+                        Some(AstParentNodeRef::SimpleAssignTarget(
+                            _,
+                            SimpleAssignTargetField::Member
+                        ))
+                    );
+
+                    if !is_lhs {
+                        if let Some(prop) = self.eval_context.eval_member_prop(&member.prop) {
+                            if let Some(prop_str) = prop.as_str() {
+                                // a namespace member access like
+                                // `import * as ns from "..."; ns.exportName`
+                                self.add_effect(Effect::ImportedBinding {
+                                    esm_reference_index,
+                                    export: Some(prop_str.into()),
+                                    ast_path: as_parent_path_skip(ast_path, 1),
+                                    span: member.span(),
+                                    in_try: is_in_try(ast_path),
+                                });
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
             self.add_effect(Effect::ImportedBinding {
                 esm_reference_index,
                 export,

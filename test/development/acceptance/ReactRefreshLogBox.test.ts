@@ -1,7 +1,11 @@
 /* eslint-env jest */
 import { createSandbox } from 'development-sandbox'
 import { FileRef, nextTestSetup } from 'e2e-utils'
-import { describeVariants as describe } from 'next-test-utils'
+import {
+  describeVariants as describe,
+  getStackFramesContent,
+  toggleCollapseCallStackFrames,
+} from 'next-test-utils'
 import path from 'path'
 import { outdent } from 'outdent'
 
@@ -756,6 +760,8 @@ describe.each(['default', 'turbo'])('ReactRefreshLogBox %s', () => {
     const { session, browser } = sandbox
     await session.assertHasRedbox()
 
+    await toggleCollapseCallStackFrames(browser)
+
     // Expect more than the default amount of frames
     // The default stackTraceLimit results in max 9 [data-nextjs-call-stack-frame] elements
     const callStackFrames = await browser.elementsByCss(
@@ -763,75 +769,67 @@ describe.each(['default', 'turbo'])('ReactRefreshLogBox %s', () => {
     )
 
     expect(callStackFrames.length).toBeGreaterThan(9)
-
-    const moduleGroup = await browser.elementsByCss(
-      '[data-nextjs-collapsed-call-stack-details]'
-    )
-    // Expect some of the call stack frames to be grouped (by React or Next.js)
-    expect(moduleGroup.length).toBeGreaterThan(0)
   })
 
-  test('should hide unrelated frames in stack trace with unknown anonymous calls', async () => {
+  // TODO: hide the anonymous frames between 2 ignored frames
+  test('should show anonymous frames from stack trace', async () => {
     await using sandbox = await createSandbox(
       next,
       new Map([
         [
           'pages/index.js',
-          // TODO: repro stringify (<anonymous>)
           outdent`
           export default function Page() {
-            const e = new Error("Client error!");
-            e.stack += \`
-              at stringify (<anonymous>)
-              at <unknown> (<anonymous>)
-              at foo (bar:1:1)\`;
-              throw e;
-            }
-            `,
+            [1, 2, 3].map(() => {
+              throw new Error("anonymous error!");
+            })
+          }`,
         ],
       ])
     )
+
     const { session, browser } = sandbox
+
     await session.assertHasRedbox()
-    let callStackFrames = await browser.elementsByCss(
-      '[data-nextjs-call-stack-frame]'
-    )
-    let texts = await Promise.all(callStackFrames.map((f) => f.innerText()))
-    expect(texts).not.toContain('stringify\n<anonymous>')
-    expect(texts).not.toContain('<unknown>\n<anonymous>')
-    expect(texts).toContain('foo\nbar (1:1)')
+
+    const stack = await getStackFramesContent(browser)
+    expect(stack).toMatchInlineSnapshot(`
+     "at Array.map ()
+     at Page (pages/index.js (2:13))"
+    `)
   })
 
-  test('should hide unrelated frames in stack trace with node:internal calls', async () => {
+  test('should collapse nodejs internal stack frames from stack trace', async () => {
     await using sandbox = await createSandbox(
       next,
       new Map([
         [
           'pages/index.js',
-          // Node.js will throw an error about the invalid URL since it happens server-side
           outdent`
-      export default function Page() {}
-      
-      export function getServerSideProps() {
-        new URL("/", "invalid");
-        return { props: {} };
-      }`,
+          export default function Page() {}
+          
+          function createURL() {
+            new URL("/", "invalid")
+          }
+
+          export function getServerSideProps() {
+            createURL()
+            return { props: {} }
+          }`,
         ],
       ])
     )
+
     const { session, browser } = sandbox
     await session.assertHasRedbox()
 
-    // Should still show the errored line in source code
-    const source = await session.getRedboxSource()
-    expect(source).toContain('pages/index.js')
-    expect(source).toContain(`new URL("/", "invalid")`)
-
-    const callStackFrames = await browser.elementsByCss(
-      '[data-nextjs-call-stack-frame]'
+    const stack = await getStackFramesContent(browser)
+    expect(stack).toMatchInlineSnapshot(
+      `"at getServerSideProps (pages/index.js (8:3))"`
     )
-    const texts = await Promise.all(callStackFrames.map((f) => f.innerText()))
 
-    expect(texts.filter((t) => t.includes('node:internal'))).toHaveLength(0)
+    await toggleCollapseCallStackFrames(browser)
+    const stackCollapsed = await getStackFramesContent(browser)
+    expect(stackCollapsed).toContain('at new URL ()')
   })
 })

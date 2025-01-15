@@ -13,11 +13,6 @@ pub mod module_options;
 pub mod transition;
 pub(crate) mod unsupported_sass;
 
-use std::{
-    collections::{HashMap, HashSet},
-    mem::swap,
-};
-
 use anyhow::{bail, Result};
 use css::{CssModuleAsset, ModuleCssAsset};
 use ecmascript::{
@@ -71,7 +66,7 @@ use crate::module_options::CustomModuleType;
 
 #[turbo_tasks::function]
 async fn apply_module_type(
-    source: Vc<Box<dyn Source>>,
+    source: ResolvedVc<Box<dyn Source>>,
     module_asset_context: Vc<ModuleAssetContext>,
     module_type: Vc<ModuleType>,
     reference_type: Value<ReferenceType>,
@@ -103,13 +98,18 @@ async fn apply_module_type(
                     module_asset_context.with_types_resolving_enabled()
                 }
                 _ => module_asset_context,
-            };
+            }
+            .to_resolved()
+            .await?;
             let mut builder = EcmascriptModuleAsset::builder(
                 source,
-                Vc::upcast(context_for_module),
+                ResolvedVc::upcast(context_for_module),
                 *transforms,
-                **options,
-                module_asset_context.compile_time_info(),
+                *options,
+                module_asset_context
+                    .compile_time_info()
+                    .to_resolved()
+                    .await?,
             );
             match module_type {
                 ModuleType::Ecmascript { .. } => {
@@ -220,22 +220,22 @@ async fn apply_module_type(
                 .await?
             }
         }
-        ModuleType::Json => ResolvedVc::upcast(JsonModuleAsset::new(source).to_resolved().await?),
-        ModuleType::Raw => ResolvedVc::upcast(RawModule::new(source).to_resolved().await?),
+        ModuleType::Json => ResolvedVc::upcast(JsonModuleAsset::new(*source).to_resolved().await?),
+        ModuleType::Raw => ResolvedVc::upcast(RawModule::new(*source).to_resolved().await?),
         ModuleType::CssGlobal => {
             return Ok(module_asset_context.process(
-                source,
+                *source,
                 Value::new(ReferenceType::Css(CssReferenceSubType::Internal)),
             ))
         }
         ModuleType::CssModule => ResolvedVc::upcast(
-            ModuleCssAsset::new(source, Vc::upcast(module_asset_context))
+            ModuleCssAsset::new(*source, Vc::upcast(module_asset_context))
                 .to_resolved()
                 .await?,
         ),
         ModuleType::Css { ty } => ResolvedVc::upcast(
             CssModuleAsset::new(
-                source,
+                *source,
                 Vc::upcast(module_asset_context),
                 *ty,
                 module_asset_context
@@ -246,7 +246,7 @@ async fn apply_module_type(
                 if let ReferenceType::Css(CssReferenceSubType::AtImport(import)) =
                     reference_type.into_value()
                 {
-                    import
+                    import.map(|v| *v)
                 } else {
                     None
                 },
@@ -255,13 +255,13 @@ async fn apply_module_type(
             .await?,
         ),
         ModuleType::Static => ResolvedVc::upcast(
-            StaticModuleAsset::new(source, Vc::upcast(module_asset_context))
+            StaticModuleAsset::new(*source, Vc::upcast(module_asset_context))
                 .to_resolved()
                 .await?,
         ),
         ModuleType::WebAssembly { source_ty } => ResolvedVc::upcast(
             WebAssemblyModuleAsset::new(
-                WebAssemblySource::new(source, *source_ty),
+                WebAssemblySource::new(*source, *source_ty),
                 Vc::upcast(module_asset_context),
             )
             .to_resolved()
@@ -269,7 +269,7 @@ async fn apply_module_type(
         ),
         ModuleType::Custom(custom) => {
             custom
-                .create_module(source, module_asset_context, part)
+                .create_module(*source, module_asset_context, part)
                 .to_resolved()
                 .await?
         }
@@ -298,16 +298,16 @@ async fn apply_reexport_tree_shaking(
         .await?;
         let module = if let Some(new_export) = new_export {
             if *new_export == *export {
-                Vc::upcast(*final_module)
+                Vc::upcast(**final_module)
             } else {
                 Vc::upcast(EcmascriptModuleFacadeModule::new(
-                    *final_module,
+                    **final_module,
                     ModulePart::renamed_export(new_export.clone(), export.clone_value()),
                 ))
             }
         } else {
             Vc::upcast(EcmascriptModuleFacadeModule::new(
-                *final_module,
+                **final_module,
                 ModulePart::renamed_namespace(export.clone_value()),
             ))
         };
@@ -432,7 +432,7 @@ impl ModuleAssetContext {
     #[turbo_tasks::function]
     async fn process_with_transition_rules(
         self: Vc<Self>,
-        source: Vc<Box<dyn Source>>,
+        source: ResolvedVc<Box<dyn Source>>,
         reference_type: Value<ReferenceType>,
     ) -> Result<Vc<ProcessResult>> {
         let this = self.await?;
@@ -443,9 +443,9 @@ impl ModuleAssetContext {
                 .get_by_rules(source, &reference_type)
                 .await?
             {
-                transition.process(source, self, reference_type)
+                transition.process(*source, self, reference_type)
             } else {
-                self.process_default(source, reference_type)
+                self.process_default(*source, reference_type)
             },
         )
     }
@@ -464,7 +464,7 @@ impl ModuleAssetContext {
 #[turbo_tasks::function]
 async fn process_default(
     module_asset_context: Vc<ModuleAssetContext>,
-    source: Vc<Box<dyn Source>>,
+    source: ResolvedVc<Box<dyn Source>>,
     reference_type: Value<ReferenceType>,
     processed_rules: Vec<usize>,
 ) -> Result<Vc<ProcessResult>> {
@@ -485,7 +485,7 @@ async fn process_default(
 
 async fn process_default_internal(
     module_asset_context: Vc<ModuleAssetContext>,
-    source: Vc<Box<dyn Source>>,
+    source: ResolvedVc<Box<dyn Source>>,
     reference_type: Value<ReferenceType>,
     processed_rules: Vec<usize>,
 ) -> Result<Vc<ProcessResult>> {
@@ -534,7 +534,8 @@ async fn process_default_internal(
             for effect in rule.effects() {
                 match effect {
                     ModuleRuleEffect::SourceTransforms(transforms) => {
-                        current_source = transforms.transform(current_source);
+                        current_source =
+                            transforms.transform(*current_source).to_resolved().await?;
                         if current_source.ident().resolve().await? != ident {
                             // The ident has been changed, so we need to apply new rules.
                             if let Some(transition) = module_asset_context
@@ -545,7 +546,7 @@ async fn process_default_internal(
                                 .await?
                             {
                                 return Ok(transition.process(
-                                    current_source,
+                                    *current_source,
                                     module_asset_context,
                                     Value::new(reference_type),
                                 ));
@@ -554,7 +555,7 @@ async fn process_default_internal(
                                 processed_rules.push(i);
                                 return Ok(process_default(
                                     module_asset_context,
-                                    current_source,
+                                    *current_source,
                                     Value::new(reference_type),
                                     processed_rules,
                                 ));
@@ -570,7 +571,11 @@ async fn process_default_internal(
                                 transforms,
                                 options,
                             }) => Some(ModuleType::Ecmascript {
-                                transforms: prepend.extend(transforms).extend(**append),
+                                transforms: prepend
+                                    .extend(*transforms)
+                                    .extend(**append)
+                                    .to_resolved()
+                                    .await?,
                                 options,
                             }),
                             Some(ModuleType::Typescript {
@@ -579,38 +584,44 @@ async fn process_default_internal(
                                 analyze_types,
                                 options,
                             }) => Some(ModuleType::Typescript {
-                                transforms: prepend.extend(transforms).extend(**append),
+                                transforms: prepend
+                                    .extend(*transforms)
+                                    .extend(**append)
+                                    .to_resolved()
+                                    .await?,
                                 tsx,
                                 analyze_types,
                                 options,
                             }),
                             Some(module_type) => {
                                 ModuleIssue {
-                                    ident,
-                                    title: StyledString::Text("Invalid module type".into()).cell(),
+                                    ident: ident.to_resolved().await?,
+                                    title: StyledString::Text("Invalid module type".into())
+                                        .resolved_cell(),
                                     description: StyledString::Text(
                                         "The module type must be Ecmascript or Typescript to add \
                                          Ecmascript transforms"
                                             .into(),
                                     )
-                                    .cell(),
+                                    .resolved_cell(),
                                 }
-                                .cell()
+                                .resolved_cell()
                                 .emit();
                                 Some(module_type)
                             }
                             None => {
                                 ModuleIssue {
-                                    ident,
-                                    title: StyledString::Text("Missing module type".into()).cell(),
+                                    ident: ident.to_resolved().await?,
+                                    title: StyledString::Text("Missing module type".into())
+                                        .resolved_cell(),
                                     description: StyledString::Text(
                                         "The module type effect must be applied before adding \
                                          Ecmascript transforms"
                                             .into(),
                                     )
-                                    .cell(),
+                                    .resolved_cell(),
                                 }
-                                .cell()
+                                .resolved_cell()
                                 .emit();
                                 None
                             }
@@ -626,12 +637,12 @@ async fn process_default_internal(
     };
 
     Ok(apply_module_type(
-        current_source,
+        *current_source,
         module_asset_context,
         module_type.cell(),
         Value::new(reference_type.clone()),
         part,
-        inner_assets,
+        inner_assets.map(|v| *v),
         matches!(reference_type, ReferenceType::Runtime),
     ))
 }
@@ -639,13 +650,13 @@ async fn process_default_internal(
 #[turbo_tasks::function]
 async fn externals_tracing_module_context(ty: ExternalType) -> Result<Vc<ModuleAssetContext>> {
     let env = Environment::new(Value::new(ExecutionEnvironment::NodeJsLambda(
-        NodeJsEnvironment::default().cell(),
+        NodeJsEnvironment::default().resolved_cell(),
     )))
     .to_resolved()
     .await?;
 
     let resolve_options = ResolveOptionsContext {
-        emulate_environment: Some(env.to_resolved().await?),
+        emulate_environment: Some(env),
         loose_errors: true,
         custom_conditions: match ty {
             ExternalType::CommonJs => vec!["require".into()],
@@ -657,7 +668,7 @@ async fn externals_tracing_module_context(ty: ExternalType) -> Result<Vc<ModuleA
 
     Ok(ModuleAssetContext::new_without_replace_externals(
         Default::default(),
-        CompileTimeInfo::builder(*env).cell(),
+        CompileTimeInfo::builder(env).cell().await?,
         ModuleOptionsContext::default().cell(),
         resolve_options.cell(),
         Vc::cell("externals-tracing".into()),
@@ -825,9 +836,7 @@ impl AssetContext for ModuleAssetContext {
                         }
                         ResolveResultItem::Ignore => ModuleResolveResultItem::Ignore,
                         ResolveResultItem::Empty => ModuleResolveResultItem::Empty,
-                        ResolveResultItem::Error(e) => {
-                            ModuleResolveResultItem::Error(e.to_resolved().await?)
-                        }
+                        ResolveResultItem::Error(e) => ModuleResolveResultItem::Error(e),
                         ResolveResultItem::Custom(u8) => ModuleResolveResultItem::Custom(u8),
                     })
                 }
@@ -895,6 +904,14 @@ pub fn emit_with_completion(asset: Vc<Box<dyn OutputAsset>>, output_dir: Vc<File
     let _ = emit_assets_aggregated(asset, output_dir);
 }
 
+#[turbo_tasks::function(operation)]
+pub fn emit_with_completion_operation(
+    asset: ResolvedVc<Box<dyn OutputAsset>>,
+    output_dir: ResolvedVc<FileSystemPath>,
+) -> Vc<()> {
+    emit_with_completion(*asset, *output_dir)
+}
+
 #[turbo_tasks::function]
 fn emit_assets_aggregated(asset: Vc<Box<dyn OutputAsset>>, output_dir: Vc<FileSystemPath>) {
     let aggregated = aggregate(asset);
@@ -934,76 +951,6 @@ pub async fn emit_asset_into_dir(
         let _ = emit_asset(asset);
     }
     Ok(())
-}
-
-type OutputAssetSet = HashSet<Vc<Box<dyn OutputAsset>>>;
-
-#[turbo_tasks::value(shared)]
-struct ReferencesList {
-    referenced_by: HashMap<ResolvedVc<Box<dyn OutputAsset>>, OutputAssetSet>,
-}
-
-#[turbo_tasks::function]
-async fn compute_back_references(
-    aggregated: ResolvedVc<AggregatedGraph>,
-) -> Result<Vc<ReferencesList>> {
-    Ok(match &*aggregated.content().await? {
-        &AggregatedGraphNodeContent::Asset(asset) => {
-            let mut referenced_by = HashMap::new();
-            for &reference in asset.references().await?.iter() {
-                referenced_by.insert(reference, [*asset].into_iter().collect());
-            }
-            ReferencesList { referenced_by }.into()
-        }
-        AggregatedGraphNodeContent::Children(children) => {
-            let mut referenced_by =
-                HashMap::<ResolvedVc<Box<dyn OutputAsset>>, OutputAssetSet>::new();
-            let lists = children
-                .iter()
-                .map(|child| compute_back_references(**child))
-                .collect::<Vec<_>>();
-            for list in lists {
-                for (key, values) in list.await?.referenced_by.iter() {
-                    if let Some(set) = referenced_by.get_mut(key) {
-                        for value in values {
-                            set.insert(*value);
-                        }
-                    } else {
-                        referenced_by.insert(*key, values.clone());
-                    }
-                }
-            }
-            ReferencesList { referenced_by }.into()
-        }
-    })
-}
-
-#[turbo_tasks::function]
-async fn top_references(list: Vc<ReferencesList>) -> Result<Vc<ReferencesList>> {
-    let list = list.await?;
-    const N: usize = 5;
-    let mut top = Vec::<(
-        &ResolvedVc<Box<dyn OutputAsset>>,
-        &HashSet<Vc<Box<dyn OutputAsset>>>,
-    )>::new();
-    for tuple in list.referenced_by.iter() {
-        let mut current = tuple;
-        for item in &mut top {
-            if item.1.len() < tuple.1.len() {
-                swap(item, &mut current);
-            }
-        }
-        if top.len() < N {
-            top.push(current);
-        }
-    }
-    Ok(ReferencesList {
-        referenced_by: top
-            .into_iter()
-            .map(|(asset, set)| (*asset, set.clone()))
-            .collect(),
-    }
-    .into())
 }
 
 /// Replaces the externals in the result with `ExternalModuleAsset` instances.

@@ -3,7 +3,7 @@ use std::{fmt::Display, io::Write};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use turbo_rcstr::RcStr;
-use turbo_tasks::{trace::TraceRawVcs, ResolvedVc, TaskInput, Vc};
+use turbo_tasks::{trace::TraceRawVcs, NonLocalValue, ResolvedVc, TaskInput, Vc};
 use turbo_tasks_fs::{glob::Glob, rope::RopeBuilder, FileContent, FileSystem, VirtualFileSystem};
 use turbopack_core::{
     asset::{Asset, AssetContent},
@@ -29,7 +29,17 @@ fn layer() -> Vc<RcStr> {
 }
 
 #[derive(
-    Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TraceRawVcs, TaskInput, Hash,
+    Copy,
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    TraceRawVcs,
+    TaskInput,
+    Hash,
+    NonLocalValue,
 )]
 pub enum CachedExternalType {
     CommonJs,
@@ -116,6 +126,18 @@ impl Module for CachedExternalModule {
             .with_modifier(Vc::cell(self.request.clone()))
             .with_modifier(Vc::cell(self.external_type.to_string().into()))
     }
+
+    #[turbo_tasks::function]
+    async fn references(&self) -> Result<Vc<ModuleReferences>> {
+        Ok(Vc::cell(self.additional_references.clone()))
+    }
+
+    #[turbo_tasks::function]
+    async fn is_self_async(&self) -> Result<Vc<bool>> {
+        Ok(Vc::cell(
+            self.external_type == CachedExternalType::EcmaScriptViaImport,
+        ))
+    }
 }
 
 #[turbo_tasks::value_impl]
@@ -164,7 +186,7 @@ impl EcmascriptChunkPlaceable for CachedExternalModule {
                         has_top_level_await: true,
                         import_externals: true,
                     }
-                    .cell(),
+                    .resolved_cell(),
                 )
             } else {
                 None
@@ -201,18 +223,6 @@ impl ChunkItem for CachedExternalModuleChunkItem {
     }
 
     #[turbo_tasks::function]
-    async fn references(&self) -> Result<Vc<ModuleReferences>> {
-        let additional_references = &self.module.await?.additional_references;
-        if !additional_references.is_empty() {
-            let mut module_references = self.module.references().await?.clone_value();
-            module_references.extend(additional_references.iter().map(|rvc| **rvc));
-            Ok(Vc::cell(module_references))
-        } else {
-            Ok(self.module.references())
-        }
-    }
-
-    #[turbo_tasks::function]
     fn ty(self: Vc<Self>) -> Vc<Box<dyn ChunkType>> {
         Vc::upcast(Vc::<EcmascriptChunkType>::default())
     }
@@ -225,13 +235,6 @@ impl ChunkItem for CachedExternalModuleChunkItem {
     #[turbo_tasks::function]
     fn chunking_context(&self) -> Vc<Box<dyn ChunkingContext>> {
         *self.chunking_context
-    }
-
-    #[turbo_tasks::function]
-    async fn is_self_async(&self) -> Result<Vc<bool>> {
-        Ok(Vc::cell(
-            self.module.await?.external_type == CachedExternalType::EcmaScriptViaImport,
-        ))
     }
 }
 

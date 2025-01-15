@@ -1,3 +1,4 @@
+#![feature(async_closure)]
 #![feature(min_specialization)]
 #![feature(box_patterns)]
 #![feature(iter_intersperse)]
@@ -19,7 +20,7 @@ pub(crate) mod util;
 pub use asset::CssModuleAsset;
 pub use module_asset::ModuleCssAsset;
 use serde::{Deserialize, Serialize};
-use turbo_tasks::{trace::TraceRawVcs, TaskInput};
+use turbo_tasks::{trace::TraceRawVcs, NonLocalValue, TaskInput};
 
 pub use self::process::*;
 use crate::references::import::ImportAssetReference;
@@ -38,6 +39,7 @@ use crate::references::import::ImportAssetReference;
     Deserialize,
     TaskInput,
     TraceRawVcs,
+    NonLocalValue,
 )]
 pub enum CssModuleAssetType {
     /// Default parsing mode.

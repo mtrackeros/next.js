@@ -113,6 +113,9 @@ const DefaultCacheHandler: CacheHandler = {
     }
   },
 
+  // This is only meant to invalidate in memory tags
+  // not meant to be propagated like expireTags would
+  // in multi-instance scenario
   async receiveExpiredTags(...tags): Promise<void> {
     return this.expireTags(...tags)
   },

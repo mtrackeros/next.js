@@ -1,6 +1,6 @@
 use anyhow::Result;
 use turbo_rcstr::RcStr;
-use turbo_tasks::{ResolvedVc, Value, Vc};
+use turbo_tasks::{ResolvedVc, TryJoinIterExt, Value, Vc};
 use turbopack_core::{
     asset::{Asset, AssetContent},
     chunk::{
@@ -64,17 +64,8 @@ impl ManifestAsyncModule {
     #[turbo_tasks::function]
     pub async fn manifest_chunks(self: Vc<Self>) -> Result<Vc<OutputAssets>> {
         let this = self.await?;
-        if let Some(chunk_items) = this.availability_info.available_chunk_items() {
-            if chunk_items
-                .get(
-                    this.inner
-                        .as_chunk_item(*ResolvedVc::upcast(this.chunking_context))
-                        .resolve()
-                        .await?,
-                )
-                .await?
-                .is_some()
-            {
+        if let Some(chunk_items) = this.availability_info.available_modules() {
+            if chunk_items.get(*this.inner).await?.is_some() {
                 return Ok(Vc::cell(vec![]));
             }
         }
@@ -91,7 +82,7 @@ impl ManifestAsyncModule {
     #[turbo_tasks::function]
     pub async fn content_ident(&self) -> Result<Vc<AssetIdent>> {
         let mut ident = self.inner.ident();
-        if let Some(available_modules) = self.availability_info.available_chunk_items() {
+        if let Some(available_modules) = self.availability_info.available_modules() {
             ident =
                 ident.with_modifier(Vc::cell(available_modules.hash().await?.to_string().into()));
         }
@@ -120,13 +111,18 @@ impl Module for ManifestAsyncModule {
                 .await?
                 .iter()
                 .copied()
-                .map(|chunk| {
-                    Vc::upcast(SingleOutputAssetReference::new(
-                        *chunk,
-                        manifest_chunk_reference_description(),
+                .map(|chunk| async move {
+                    Ok(ResolvedVc::upcast(
+                        SingleOutputAssetReference::new(
+                            *chunk,
+                            manifest_chunk_reference_description(),
+                        )
+                        .to_resolved()
+                        .await?,
                     ))
                 })
-                .collect(),
+                .try_join()
+                .await?,
         ))
     }
 }
