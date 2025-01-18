@@ -225,6 +225,14 @@
         ],
         "@typescript-eslint/no-import-type-side-effects": "error"
       }
+    },
+    {
+      "files": ["*.mdx"],
+      "extends": ["plugin:mdx/recommended"],
+      "parser": "eslint-mdx",
+      "rules": {
+        "react/jsx-no-undef": "off"
+      }
     }
   ],
   "rules": {

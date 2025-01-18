@@ -14,7 +14,7 @@ use turbopack_core::{
     chunk::{AsyncModuleInfo, ChunkItem, ChunkType, ChunkingContext},
     ident::AssetIdent,
     module::Module,
-    reference::ModuleReferences,
+    module_graph::ModuleGraph,
 };
 
 use super::module::EcmascriptModuleFacadeModule;
@@ -31,6 +31,7 @@ use crate::{
 #[turbo_tasks::value(shared)]
 pub struct EcmascriptModuleFacadeChunkItem {
     pub(crate) module: ResolvedVc<EcmascriptModuleFacadeModule>,
+    pub(crate) module_graph: ResolvedVc<ModuleGraph>,
     pub(crate) chunking_context: ResolvedVc<Box<dyn ChunkingContext>>,
 }
 
@@ -74,19 +75,23 @@ impl EcmascriptChunkItem for EcmascriptModuleFacadeChunkItem {
             if let Some(code_gen) =
                 Vc::try_resolve_sidecast::<Box<dyn CodeGenerateableWithAsyncModuleInfo>>(r).await?
             {
-                code_gens.push(code_gen.code_generation(*chunking_context, async_module_info));
+                code_gens.push(code_gen.code_generation(
+                    *self.module_graph,
+                    *chunking_context,
+                    async_module_info,
+                ));
             } else if let Some(code_gen) =
                 Vc::try_resolve_sidecast::<Box<dyn CodeGenerateable>>(r).await?
             {
-                code_gens.push(code_gen.code_generation(*chunking_context));
+                code_gens.push(code_gen.code_generation(*self.module_graph, *chunking_context));
             }
         }
-        code_gens.push(self.module.async_module().code_generation(
-            *chunking_context,
-            async_module_info,
-            references,
-        ));
-        code_gens.push(exports.code_generation(*chunking_context));
+        code_gens.push(
+            self.module
+                .async_module()
+                .code_generation(async_module_info, references),
+        );
+        code_gens.push(exports.code_generation(*self.module_graph, *chunking_context));
         let code_gens = code_gens.into_iter().try_join().await?;
         let code_gens = code_gens.iter().map(|cg| &**cg).collect::<Vec<_>>();
 
@@ -131,11 +136,6 @@ impl EcmascriptChunkItem for EcmascriptModuleFacadeChunkItem {
 #[turbo_tasks::value_impl]
 impl ChunkItem for EcmascriptModuleFacadeChunkItem {
     #[turbo_tasks::function]
-    fn references(&self) -> Vc<ModuleReferences> {
-        self.module.references()
-    }
-
-    #[turbo_tasks::function]
     fn asset_ident(&self) -> Vc<AssetIdent> {
         self.module.ident()
     }
@@ -155,19 +155,5 @@ impl ChunkItem for EcmascriptModuleFacadeChunkItem {
     #[turbo_tasks::function]
     fn module(&self) -> Vc<Box<dyn Module>> {
         *ResolvedVc::upcast(self.module)
-    }
-
-    #[turbo_tasks::function]
-    async fn is_self_async(&self) -> Result<Vc<bool>> {
-        let module = self.module;
-        let async_module = module.async_module();
-        let references = module.references();
-        let is_self_async = async_module
-            .resolve()
-            .await?
-            .is_self_async(references.resolve().await?)
-            .resolve()
-            .await?;
-        Ok(is_self_async)
     }
 }

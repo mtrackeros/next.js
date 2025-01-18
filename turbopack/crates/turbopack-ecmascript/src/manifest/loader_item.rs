@@ -10,7 +10,8 @@ use turbopack_core::{
     },
     ident::AssetIdent,
     module::Module,
-    reference::{ModuleReference, ModuleReferences, SingleOutputAssetReference},
+    module_graph::ModuleGraph,
+    output::OutputAssets,
 };
 
 use super::chunk_asset::ManifestAsyncModule;
@@ -44,6 +45,7 @@ fn modifier() -> Vc<RcStr> {
 #[turbo_tasks::value]
 pub struct ManifestLoaderChunkItem {
     manifest: ResolvedVc<ManifestAsyncModule>,
+    module_graph: ResolvedVc<ModuleGraph>,
     chunking_context: ResolvedVc<Box<dyn ChunkingContext>>,
 }
 
@@ -52,10 +54,12 @@ impl ManifestLoaderChunkItem {
     #[turbo_tasks::function]
     pub fn new(
         manifest: ResolvedVc<ManifestAsyncModule>,
+        module_graph: ResolvedVc<ModuleGraph>,
         chunking_context: ResolvedVc<Box<dyn ChunkingContext>>,
     ) -> Vc<Self> {
         Self::cell(ManifestLoaderChunkItem {
             manifest,
+            module_graph,
             chunking_context,
         })
     }
@@ -95,29 +99,11 @@ impl ChunkItem for ManifestLoaderChunkItem {
     }
 
     #[turbo_tasks::function]
-    async fn references(self: Vc<Self>) -> Result<Vc<ModuleReferences>> {
+    async fn references(self: Vc<Self>) -> Result<Vc<OutputAssets>> {
         let this = self.await?;
-
-        let chunks = this.manifest.manifest_chunks();
-
-        let mut references: Vec<Vc<Box<dyn ModuleReference>>> = chunks
-            .await?
-            .iter()
-            .map(|&chunk| {
-                Vc::upcast(SingleOutputAssetReference::new(
-                    *chunk,
-                    manifest_loader_chunk_reference_description(),
-                ))
-            })
-            .collect();
-
+        let mut references = (*this.manifest.manifest_chunks().await?).clone();
         for chunk_data in &*self.chunks_data().await? {
-            references.extend(chunk_data.references().await?.iter().map(|&output_asset| {
-                Vc::upcast(SingleOutputAssetReference::new(
-                    *output_asset,
-                    chunk_data_reference_description(),
-                ))
-            }));
+            references.extend(chunk_data.references().await?);
         }
 
         Ok(Vc::cell(references))
@@ -165,7 +151,10 @@ impl EcmascriptChunkItem for ManifestLoaderChunkItem {
         // exports a promise for all of the necessary chunk loads.
         let item_id = &*this
             .manifest
-            .as_chunk_item(*ResolvedVc::upcast(manifest.chunking_context))
+            .as_chunk_item(
+                *this.module_graph,
+                *ResolvedVc::upcast(manifest.chunking_context),
+            )
             .id()
             .await?;
 
@@ -176,7 +165,10 @@ impl EcmascriptChunkItem for ManifestLoaderChunkItem {
                 .await?
                 .ok_or_else(|| anyhow!("asset is not placeable in ecmascript chunk"))?;
         let dynamic_id = &*placeable
-            .as_chunk_item(*ResolvedVc::upcast(manifest.chunking_context))
+            .as_chunk_item(
+                *this.module_graph,
+                *ResolvedVc::upcast(manifest.chunking_context),
+            )
             .id()
             .await?;
 

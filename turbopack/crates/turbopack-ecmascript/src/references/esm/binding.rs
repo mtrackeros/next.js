@@ -14,8 +14,8 @@ use swc_core::{
     },
 };
 use turbo_rcstr::RcStr;
-use turbo_tasks::{trace::TraceRawVcs, ResolvedVc, TaskInput, Vc};
-use turbopack_core::chunk::ChunkingContext;
+use turbo_tasks::{trace::TraceRawVcs, NonLocalValue, ResolvedVc, TaskInput, Vc};
+use turbopack_core::{chunk::ChunkingContext, module_graph::ModuleGraph};
 
 use super::EsmAssetReference;
 use crate::{
@@ -38,16 +38,18 @@ impl EsmBindings {
     }
 }
 
-#[derive(Hash, Clone, Debug, TaskInput, Serialize, Deserialize, PartialEq, Eq, TraceRawVcs)]
+#[derive(
+    Hash, Clone, Debug, TaskInput, Serialize, Deserialize, PartialEq, Eq, TraceRawVcs, NonLocalValue,
+)]
 pub struct EsmBinding {
-    pub reference: Vc<EsmAssetReference>,
+    pub reference: ResolvedVc<EsmAssetReference>,
     pub export: Option<RcStr>,
     pub ast_path: ResolvedVc<AstPath>,
 }
 
 impl EsmBinding {
     pub fn new(
-        reference: Vc<EsmAssetReference>,
+        reference: ResolvedVc<EsmAssetReference>,
         export: Option<RcStr>,
         ast_path: ResolvedVc<AstPath>,
     ) -> Self {
@@ -153,7 +155,8 @@ impl CodeGenerateable for EsmBindings {
     #[turbo_tasks::function]
     async fn code_generation(
         &self,
-        _context: Vc<Box<dyn ChunkingContext>>,
+        _module_graph: Vc<ModuleGraph>,
+        _chunking_context: Vc<Box<dyn ChunkingContext>>,
     ) -> Result<Vc<CodeGeneration>> {
         let mut visitors = Vec::new();
         let bindings = self.bindings.clone();

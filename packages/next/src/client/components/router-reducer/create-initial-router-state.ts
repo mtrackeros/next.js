@@ -74,7 +74,8 @@ export function createInitialRouterState({
       undefined,
       initialTree,
       initialSeedData,
-      initialHead
+      initialHead,
+      undefined
     )
   }
 

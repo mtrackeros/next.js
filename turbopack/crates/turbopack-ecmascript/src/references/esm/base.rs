@@ -18,6 +18,7 @@ use turbopack_core::{
         OptionStyledString, StyledString,
     },
     module::Module,
+    module_graph::ModuleGraph,
     reference::ModuleReference,
     reference_type::{EcmaScriptModulesReferenceSubType, ImportWithType},
     resolve::{
@@ -114,11 +115,11 @@ pub struct EsmAssetReference {
 
 impl EsmAssetReference {
     fn get_origin(&self) -> Vc<Box<dyn ResolveOrigin>> {
-        let mut origin = *self.origin;
         if let Some(transition) = self.annotations.transition() {
-            origin = origin.with_transition(transition.into());
+            self.origin.with_transition(transition.into())
+        } else {
+            *self.origin
         }
-        origin
     }
 }
 
@@ -201,7 +202,7 @@ impl ModuleReference for EsmAssetReference {
                                 module,
                                 source: self.issue_source,
                             }
-                            .cell()
+                            .resolved_cell()
                             .emit();
                         }
                     }
@@ -251,6 +252,7 @@ impl CodeGenerateable for EsmAssetReference {
     #[turbo_tasks::function]
     async fn code_generation(
         self: Vc<Self>,
+        module_graph: Vc<ModuleGraph>,
         chunking_context: Vc<Box<dyn ChunkingContext>>,
     ) -> Result<Vc<CodeGeneration>> {
         let this = &*self.await?;
@@ -283,7 +285,7 @@ impl CodeGenerateable for EsmAssetReference {
                     }
                     ReferencedAsset::Some(asset) => {
                         let id = asset
-                            .as_chunk_item(Vc::upcast(chunking_context))
+                            .as_chunk_item(module_graph, Vc::upcast(chunking_context))
                             .id()
                             .await?;
                         Some((
@@ -460,7 +462,7 @@ impl Issue for InvalidExport {
                         .into(),
                 ),
             ])
-            .cell(),
+            .resolved_cell(),
         )))
     }
 
@@ -479,12 +481,12 @@ impl Issue for InvalidExport {
                         .into(),
                 ),
             ])
-            .cell(),
+            .resolved_cell(),
         )))
     }
 
     #[turbo_tasks::function]
     fn source(&self) -> Vc<OptionIssueSource> {
-        Vc::cell(Some(*self.source))
+        Vc::cell(Some(self.source))
     }
 }

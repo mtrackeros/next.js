@@ -23,6 +23,10 @@ import type { RequestData } from '../../server/web/types'
 import type { BuildManifest } from '../../server/get-page-files'
 import type { NextConfigComplete } from '../../server/config-shared'
 import type { PAGE_TYPES } from '../../lib/page-types'
+import {
+  cacheHandlerGlobal,
+  cacheHandlersSymbol,
+} from '../../server/use-cache/constants'
 
 // injected by the loader afterwards.
 declare const pagesType: PAGE_TYPES
@@ -42,8 +46,14 @@ declare const user500RouteModuleOptions: any
 
 const cacheHandlers = {}
 
-if (!(globalThis as any).__nextCacheHandlers) {
-  ;(globalThis as any).__nextCacheHandlers = cacheHandlers
+if (!cacheHandlerGlobal.__nextCacheHandlers) {
+  cacheHandlerGlobal.__nextCacheHandlers = cacheHandlers
+
+  if (!cacheHandlerGlobal.__nextCacheHandlers.default) {
+    cacheHandlerGlobal.__nextCacheHandlers.default =
+      cacheHandlerGlobal[cacheHandlersSymbol]?.DefaultCache ||
+      cacheHandlerGlobal.__nextCacheHandlers.__nextDefault
+  }
 }
 
 const pageMod = {
@@ -89,6 +99,7 @@ const maybeJSONParse = (str?: string) => (str ? JSON.parse(str) : undefined)
 
 const buildManifest: BuildManifest = self.__BUILD_MANIFEST as any
 const reactLoadableManifest = maybeJSONParse(self.__REACT_LOADABLE_MANIFEST)
+const dynamicCssManifest = maybeJSONParse(self.__DYNAMIC_CSS_MANIFEST)
 const subresourceIntegrityManifest = sriEnabled
   ? maybeJSONParse(self.__SUBRESOURCE_INTEGRITY_MANIFEST)
   : undefined
@@ -106,6 +117,7 @@ const render = getRender({
   buildManifest,
   renderToHTML,
   reactLoadableManifest,
+  dynamicCssManifest,
   subresourceIntegrityManifest,
   config: nextConfig,
   buildId: process.env.__NEXT_BUILD_ID!,

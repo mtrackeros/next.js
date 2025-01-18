@@ -6,6 +6,7 @@ use turbopack_core::{
     chunk::{availability_info::AvailabilityInfo, ChunkableModule, ChunkingContext},
     ident::AssetIdent,
     module::Module,
+    module_graph::ModuleGraph,
     reference::{ModuleReferences, SingleModuleReference},
 };
 
@@ -60,10 +61,14 @@ impl Module for AsyncLoaderModule {
 
     #[turbo_tasks::function]
     async fn references(self: Vc<Self>) -> Result<Vc<ModuleReferences>> {
-        Ok(Vc::cell(vec![Vc::upcast(SingleModuleReference::new(
-            *ResolvedVc::upcast(self.await?.inner),
-            inner_module_reference_description(),
-        ))]))
+        Ok(Vc::cell(vec![ResolvedVc::upcast(
+            SingleModuleReference::new(
+                *ResolvedVc::upcast(self.await?.inner),
+                inner_module_reference_description(),
+            )
+            .to_resolved()
+            .await?,
+        )]))
     }
 }
 
@@ -80,11 +85,13 @@ impl ChunkableModule for AsyncLoaderModule {
     #[turbo_tasks::function]
     async fn as_chunk_item(
         self: ResolvedVc<Self>,
+        module_graph: ResolvedVc<ModuleGraph>,
         chunking_context: ResolvedVc<Box<dyn ChunkingContext>>,
     ) -> Vc<Box<dyn turbopack_core::chunk::ChunkItem>> {
         Vc::upcast(
             AsyncLoaderChunkItem {
                 chunking_context,
+                module_graph,
                 module: self,
             }
             .cell(),

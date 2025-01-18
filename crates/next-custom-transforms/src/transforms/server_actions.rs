@@ -932,18 +932,20 @@ impl<C: Comments> VisitMut for ServerActions<C> {
     }
 
     fn visit_mut_fn_expr(&mut self, f: &mut FnExpr) {
+        let old_this_status = replace(&mut self.this_status, ThisStatus::Allowed);
         let old_arrow_or_fn_expr_ident = self.arrow_or_fn_expr_ident.clone();
         if let Some(ident) = &f.ident {
             self.arrow_or_fn_expr_ident = Some(ident.clone());
         }
         f.visit_mut_children_with(self);
+        self.this_status = old_this_status;
         self.arrow_or_fn_expr_ident = old_arrow_or_fn_expr_ident;
     }
 
     fn visit_mut_function(&mut self, f: &mut Function) {
         let directive = self.get_directive_for_function(f.body.as_mut());
         let declared_idents_until = self.declared_idents.len();
-        let current_names = take(&mut self.names);
+        let old_names = take(&mut self.names);
 
         if let Some(directive) = &directive {
             self.this_status = ThisStatus::Forbidden {
@@ -967,19 +969,6 @@ impl<C: Comments> VisitMut for ServerActions<C> {
             self.fn_decl_ident = old_fn_decl_ident;
         }
 
-        if !self.config.is_react_server_layer {
-            return;
-        }
-
-        let mut child_names = if self.should_track_names {
-            let names = take(&mut self.names);
-            self.names = current_names;
-            self.names.extend(names.iter().cloned());
-            names
-        } else {
-            take(&mut self.names)
-        };
-
         if let Some(directive) = directive {
             if !f.is_async {
                 emit_error(ServerActionsErrorKind::InlineSyncFunction {
@@ -988,6 +977,19 @@ impl<C: Comments> VisitMut for ServerActions<C> {
                 });
 
                 return;
+            }
+
+            let has_errors = HANDLER.with(|handler| handler.has_errors());
+
+            // Don't hoist a function if 1) an error was emitted, or 2) we're in the client layer.
+            if has_errors || !self.config.is_react_server_layer {
+                return;
+            }
+
+            let mut child_names = take(&mut self.names);
+
+            if self.should_track_names {
+                self.names = [old_names, child_names.clone()].concat();
             }
 
             if let Directive::UseCache { cache_kind } = directive {
@@ -1116,7 +1118,7 @@ impl<C: Comments> VisitMut for ServerActions<C> {
         }
 
         let declared_idents_until = self.declared_idents.len();
-        let current_names = take(&mut self.names);
+        let old_names = take(&mut self.names);
 
         {
             // Visit children
@@ -1137,19 +1139,6 @@ impl<C: Comments> VisitMut for ServerActions<C> {
             self.in_default_export_decl = old_in_default_export_decl;
         }
 
-        if !self.config.is_react_server_layer {
-            return;
-        }
-
-        let mut child_names = if self.should_track_names {
-            let names = take(&mut self.names);
-            self.names = current_names;
-            self.names.extend(names.iter().cloned());
-            names
-        } else {
-            take(&mut self.names)
-        };
-
         if let Some(directive) = directive {
             if !a.is_async {
                 emit_error(ServerActionsErrorKind::InlineSyncFunction {
@@ -1158,6 +1147,20 @@ impl<C: Comments> VisitMut for ServerActions<C> {
                 });
 
                 return;
+            }
+
+            let has_errors = HANDLER.with(|handler| handler.has_errors());
+
+            // Don't hoist an arrow expression if 1) an error was emitted, or 2) we're in the client
+            // layer.
+            if has_errors || !self.config.is_react_server_layer {
+                return;
+            }
+
+            let mut child_names = take(&mut self.names);
+
+            if self.should_track_names {
+                self.names = [old_names, child_names.clone()].concat();
             }
 
             // Collect all the identifiers defined inside the closure and used
@@ -1261,6 +1264,12 @@ impl<C: Comments> VisitMut for ServerActions<C> {
         n.visit_mut_children_with(self);
         self.arrow_or_fn_expr_ident = old_arrow_or_fn_expr_ident;
         self.in_exported_expr = old_in_exported_expr;
+    }
+
+    fn visit_mut_class(&mut self, n: &mut Class) {
+        let old_this_status = replace(&mut self.this_status, ThisStatus::Allowed);
+        n.visit_mut_children_with(self);
+        self.this_status = old_this_status;
     }
 
     fn visit_mut_class_member(&mut self, n: &mut ClassMember) {
@@ -2140,6 +2149,16 @@ impl<C: Comments> VisitMut for ServerActions<C> {
         }
     }
 
+    fn visit_mut_super(&mut self, n: &mut Super) {
+        if let ThisStatus::Forbidden { directive } = &self.this_status {
+            emit_error(ServerActionsErrorKind::ForbiddenExpression {
+                span: n.span,
+                expr: "super".into(),
+                directive: directive.clone(),
+            });
+        }
+    }
+
     fn visit_mut_ident(&mut self, n: &mut Ident) {
         if n.sym == *"arguments" {
             if let ThisStatus::Forbidden { directive } = &self.this_status {
@@ -2567,8 +2586,16 @@ fn collect_idents_in_pat(pat: &Pat, idents: &mut Vec<Ident>) {
 }
 
 fn collect_decl_idents_in_stmt(stmt: &Stmt, idents: &mut Vec<Ident>) {
-    if let Stmt::Decl(Decl::Var(var)) = &stmt {
-        collect_idents_in_var_decls(&var.decls, idents);
+    if let Stmt::Decl(decl) = stmt {
+        match decl {
+            Decl::Var(var) => {
+                collect_idents_in_var_decls(&var.decls, idents);
+            }
+            Decl::Fn(fn_decl) => {
+                idents.push(fn_decl.ident.clone());
+            }
+            _ => {}
+        }
     }
 }
 
@@ -2617,6 +2644,12 @@ impl DirectiveVisitor<'_> {
                     }
                 } else if detect_similar_strings(value, "use server") {
                     // Detect typo of "use server"
+                    emit_error(ServerActionsErrorKind::MisspelledDirective {
+                        span: *span,
+                        directive: value.to_string(),
+                        expected_directive: "use server".to_string(),
+                    });
+                } else if value == "use action" {
                     emit_error(ServerActionsErrorKind::MisspelledDirective {
                         span: *span,
                         directive: value.to_string(),

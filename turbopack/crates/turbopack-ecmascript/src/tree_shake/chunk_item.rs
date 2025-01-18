@@ -5,7 +5,7 @@ use turbopack_core::{
     chunk::{AsyncModuleInfo, ChunkItem, ChunkType, ChunkingContext},
     ident::AssetIdent,
     module::Module,
-    reference::ModuleReferences,
+    module_graph::ModuleGraph,
 };
 
 use super::{asset::EcmascriptModulePartAsset, part_of_module, split_module};
@@ -27,6 +27,7 @@ use crate::{
 #[turbo_tasks::value(shared)]
 pub struct EcmascriptModulePartChunkItem {
     pub(super) module: ResolvedVc<EcmascriptModulePartAsset>,
+    pub(super) module_graph: ResolvedVc<ModuleGraph>,
     pub(super) chunking_context: ResolvedVc<Box<dyn ChunkingContext>>,
 }
 
@@ -56,11 +57,12 @@ impl EcmascriptChunkItem for EcmascriptModulePartChunkItem {
             parsed,
             module.full_module.ident(),
             module_type_result.module_type,
+            *self.module_graph,
             *self.chunking_context,
             *analyze.references,
             *analyze.code_generation,
             *analyze.async_module,
-            analyze.source_map,
+            *analyze.source_map,
             *analyze.exports,
             async_module_info,
         );
@@ -82,11 +84,6 @@ impl EcmascriptChunkItem for EcmascriptModulePartChunkItem {
 #[turbo_tasks::value_impl]
 impl ChunkItem for EcmascriptModulePartChunkItem {
     #[turbo_tasks::function]
-    fn references(&self) -> Vc<ModuleReferences> {
-        self.module.references()
-    }
-
-    #[turbo_tasks::function]
     fn asset_ident(&self) -> Vc<AssetIdent> {
         self.module.ident()
     }
@@ -107,26 +104,16 @@ impl ChunkItem for EcmascriptModulePartChunkItem {
     fn module(&self) -> Vc<Box<dyn Module>> {
         *ResolvedVc::upcast(self.module)
     }
-
-    #[turbo_tasks::function]
-    fn is_self_async(&self) -> Vc<bool> {
-        self.module.is_async_module()
-    }
 }
 
 #[turbo_tasks::value(shared)]
 pub(super) struct SideEffectsModuleChunkItem {
-    pub module: Vc<SideEffectsModule>,
-    pub chunking_context: Vc<Box<dyn ChunkingContext>>,
+    pub module: ResolvedVc<SideEffectsModule>,
+    pub chunking_context: ResolvedVc<Box<dyn ChunkingContext>>,
 }
 
 #[turbo_tasks::value_impl]
 impl ChunkItem for SideEffectsModuleChunkItem {
-    #[turbo_tasks::function]
-    fn references(&self) -> Vc<ModuleReferences> {
-        self.module.references()
-    }
-
     #[turbo_tasks::function]
     fn asset_ident(&self) -> Vc<AssetIdent> {
         self.module.ident()
@@ -139,12 +126,12 @@ impl ChunkItem for SideEffectsModuleChunkItem {
 
     #[turbo_tasks::function]
     fn module(&self) -> Vc<Box<dyn Module>> {
-        Vc::upcast(self.module)
+        *ResolvedVc::upcast(self.module)
     }
 
     #[turbo_tasks::function]
     fn chunking_context(&self) -> Vc<Box<dyn ChunkingContext>> {
-        self.chunking_context
+        *self.chunking_context
     }
 }
 
@@ -215,6 +202,6 @@ impl EcmascriptChunkItem for SideEffectsModuleChunkItem {
 
     #[turbo_tasks::function]
     fn chunking_context(&self) -> Vc<Box<dyn ChunkingContext>> {
-        self.chunking_context
+        *self.chunking_context
     }
 }

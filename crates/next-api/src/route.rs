@@ -1,82 +1,77 @@
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use turbo_rcstr::RcStr;
-use turbo_tasks::{debug::ValueDebugFormat, trace::TraceRawVcs, Completion, FxIndexMap, Vc};
-use turbopack_core::module::Modules;
+use turbo_tasks::{
+    debug::ValueDebugFormat, trace::TraceRawVcs, Completion, FxIndexMap, NonLocalValue,
+    OperationVc, ResolvedVc, Vc,
+};
+use turbopack_core::{module::Modules, module_graph::ModuleGraph};
 
 use crate::paths::ServerPath;
 
-#[derive(TraceRawVcs, Serialize, Deserialize, PartialEq, Eq, ValueDebugFormat, Clone, Debug)]
+#[derive(
+    TraceRawVcs,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    ValueDebugFormat,
+    Clone,
+    Debug,
+    NonLocalValue,
+)]
 pub struct AppPageRoute {
-    pub original_name: String,
-    pub html_endpoint: Vc<Box<dyn Endpoint>>,
-    pub rsc_endpoint: Vc<Box<dyn Endpoint>>,
-}
-
-impl AppPageRoute {
-    async fn resolve(&mut self) -> Result<()> {
-        let Self {
-            html_endpoint,
-            rsc_endpoint,
-            ..
-        } = self;
-        *html_endpoint = html_endpoint.resolve().await?;
-        *rsc_endpoint = rsc_endpoint.resolve().await?;
-        Ok(())
-    }
+    pub original_name: RcStr,
+    pub html_endpoint: ResolvedVc<Box<dyn Endpoint>>,
+    pub rsc_endpoint: ResolvedVc<Box<dyn Endpoint>>,
 }
 
 #[turbo_tasks::value(shared)]
 #[derive(Clone, Debug)]
 pub enum Route {
     Page {
-        html_endpoint: Vc<Box<dyn Endpoint>>,
-        data_endpoint: Vc<Box<dyn Endpoint>>,
+        html_endpoint: ResolvedVc<Box<dyn Endpoint>>,
+        data_endpoint: ResolvedVc<Box<dyn Endpoint>>,
     },
     PageApi {
-        endpoint: Vc<Box<dyn Endpoint>>,
+        endpoint: ResolvedVc<Box<dyn Endpoint>>,
     },
     AppPage(Vec<AppPageRoute>),
     AppRoute {
-        original_name: String,
-        endpoint: Vc<Box<dyn Endpoint>>,
+        original_name: RcStr,
+        endpoint: ResolvedVc<Box<dyn Endpoint>>,
     },
     Conflict,
 }
 
-impl Route {
-    pub async fn resolve(&mut self) -> Result<()> {
-        match self {
-            Route::Page {
-                html_endpoint,
-                data_endpoint,
-            } => {
-                *html_endpoint = html_endpoint.resolve().await?;
-                *data_endpoint = data_endpoint.resolve().await?;
-            }
-            Route::PageApi { endpoint } => {
-                *endpoint = endpoint.resolve().await?;
-            }
-            Route::AppPage(routes) => {
-                for route in routes {
-                    route.resolve().await?;
-                }
-            }
-            Route::AppRoute { endpoint, .. } => {
-                *endpoint = endpoint.resolve().await?;
-            }
-            Route::Conflict => {}
-        }
-        Ok(())
-    }
-}
-
-#[turbo_tasks::value_trait]
+#[turbo_tasks::value_trait(local)]
 pub trait Endpoint {
     fn write_to_disk(self: Vc<Self>) -> Vc<WrittenEndpoint>;
     fn server_changed(self: Vc<Self>) -> Vc<Completion>;
     fn client_changed(self: Vc<Self>) -> Vc<Completion>;
+    /// The entry modules for the modules graph.
     fn root_modules(self: Vc<Self>) -> Vc<Modules>;
+    /// Additional entry modules for the module graph.
+    /// This may read the module graph and return additional modules.
+    fn additional_root_modules(self: Vc<Self>, _graph: Vc<ModuleGraph>) -> Vc<Modules> {
+        Modules::empty()
+    }
+}
+
+#[turbo_tasks::value(transparent)]
+pub struct Endpoints(Vec<ResolvedVc<Box<dyn Endpoint>>>);
+
+#[turbo_tasks::function(operation)]
+pub fn endpoint_write_to_disk_operation(
+    endpoint: OperationVc<Box<dyn Endpoint>>,
+) -> Vc<WrittenEndpoint> {
+    endpoint.connect().write_to_disk()
+}
+
+#[turbo_tasks::function(operation)]
+pub fn endpoint_server_changed_operation(
+    endpoint: OperationVc<Box<dyn Endpoint>>,
+) -> Vc<Completion> {
+    endpoint.connect().server_changed()
 }
 
 #[turbo_tasks::value(shared)]

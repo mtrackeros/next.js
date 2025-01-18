@@ -9,8 +9,8 @@ use turbopack_core::{
     },
     ident::AssetIdent,
     module::Module,
+    module_graph::ModuleGraph,
     output::OutputAssets,
-    reference::{ModuleReferences, SingleOutputAssetReference},
 };
 
 use super::module::WorkerLoaderModule;
@@ -25,6 +25,7 @@ use crate::{
 #[turbo_tasks::value(shared)]
 pub struct WorkerLoaderChunkItem {
     pub module: ResolvedVc<WorkerLoaderModule>,
+    pub module_graph: ResolvedVc<ModuleGraph>,
     pub chunking_context: ResolvedVc<Box<dyn ChunkingContext>>,
 }
 
@@ -55,6 +56,7 @@ impl WorkerLoaderChunkItem {
             )
             .with_modifier(worker_modifier()),
             EvaluatableAssets::empty().with_entry(*evaluatable),
+            *self.module_graph,
             Value::new(AvailabilityInfo::Root),
         ))
     }
@@ -118,22 +120,8 @@ impl ChunkItem for WorkerLoaderChunkItem {
     }
 
     #[turbo_tasks::function]
-    async fn references(self: Vc<Self>) -> Result<Vc<ModuleReferences>> {
-        let chunks = self.chunks();
-
-        Ok(Vc::cell(
-            chunks
-                .await?
-                .iter()
-                .copied()
-                .map(|chunk| {
-                    Vc::upcast(SingleOutputAssetReference::new(
-                        *chunk,
-                        chunk_reference_description(),
-                    ))
-                })
-                .collect(),
-        ))
+    fn references(self: Vc<Self>) -> Vc<OutputAssets> {
+        self.chunks()
     }
 
     #[turbo_tasks::function]

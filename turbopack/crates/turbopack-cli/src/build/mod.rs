@@ -13,16 +13,19 @@ use turbo_tasks::{
 };
 use turbo_tasks_fs::FileSystem;
 use turbo_tasks_memory::MemoryBackend;
+use turbopack_browser::BrowserChunkingContext;
 use turbopack_cli_utils::issue::{ConsoleUi, LogOptions};
 use turbopack_core::{
     asset::Asset,
     chunk::{
-        availability_info::AvailabilityInfo, ChunkableModule, ChunkingContext, ChunkingContextExt,
-        EvaluatableAsset, EvaluatableAssets, MinifyType,
+        availability_info::AvailabilityInfo, ChunkingContext, EvaluatableAsset, EvaluatableAssets,
+        MinifyType,
     },
-    environment::{BrowserEnvironment, Environment, ExecutionEnvironment},
+    environment::{BrowserEnvironment, Environment, ExecutionEnvironment, NodeJsEnvironment},
+    ident::AssetIdent,
     issue::{handle_issues, IssueReporter, IssueSeverity},
     module::Module,
+    module_graph::ModuleGraph,
     output::{OutputAsset, OutputAssets},
     reference::all_assets_from_entries,
     reference_type::{EntryReferenceSubType, ReferenceType},
@@ -37,7 +40,7 @@ use turbopack_node::execution_context::ExecutionContext;
 use turbopack_nodejs::NodeJsChunkingContext;
 
 use crate::{
-    arguments::BuildArguments,
+    arguments::{BuildArguments, Target},
     contexts::{get_client_asset_context, get_client_compile_time_info, NodeEnv},
     util::{
         normalize_dirs, normalize_entries, output_fs, project_fs, EntryRequest, EntryRequests,
@@ -60,6 +63,7 @@ pub struct TurbopackBuildBuilder {
     show_all: bool,
     log_detail: bool,
     minify_type: MinifyType,
+    target: Target,
 }
 
 impl TurbopackBuildBuilder {
@@ -78,6 +82,7 @@ impl TurbopackBuildBuilder {
             show_all: false,
             log_detail: false,
             minify_type: MinifyType::Minify,
+            target: Target::Node,
         }
     }
 
@@ -111,9 +116,14 @@ impl TurbopackBuildBuilder {
         self
     }
 
+    pub fn target(mut self, target: Target) -> Self {
+        self.target = target;
+        self
+    }
+
     pub async fn build(self) -> Result<()> {
         let task = self.turbo_tasks.spawn_once_task::<(), _>(async move {
-            let build_result = build_internal(
+            let build_result_op = build_internal(
                 self.project_dir.clone(),
                 self.root_dir,
                 EntryRequests(
@@ -123,15 +133,16 @@ impl TurbopackBuildBuilder {
                         .map(EntryRequest::resolved_cell)
                         .collect(),
                 )
-                .cell(),
+                .resolved_cell(),
                 self.browserslist_query,
                 self.minify_type,
+                self.target,
             );
 
             // Await the result to propagate any errors.
-            build_result.strongly_consistent().await?;
+            build_result_op.connect().strongly_consistent().await?;
 
-            apply_effects(build_result).await?;
+            apply_effects(build_result_op).await?;
 
             let issue_reporter: Vc<Box<dyn IssueReporter>> =
                 Vc::upcast(ConsoleUi::new(TransientInstance::new(LogOptions {
@@ -143,7 +154,7 @@ impl TurbopackBuildBuilder {
                 })));
 
             handle_issues(
-                build_result,
+                build_result_op,
                 issue_reporter,
                 IssueSeverity::Error.into(),
                 None,
@@ -162,23 +173,15 @@ impl TurbopackBuildBuilder {
     }
 }
 
-#[turbo_tasks::function]
+#[turbo_tasks::function(operation)]
 async fn build_internal(
     project_dir: RcStr,
     root_dir: RcStr,
-    entry_requests: Vc<EntryRequests>,
+    entry_requests: ResolvedVc<EntryRequests>,
     browserslist_query: RcStr,
     minify_type: MinifyType,
+    target: Target,
 ) -> Result<Vc<()>> {
-    let env = Environment::new(Value::new(ExecutionEnvironment::Browser(
-        BrowserEnvironment {
-            dom: true,
-            web_worker: false,
-            service_worker: false,
-            browserslist_query: browserslist_query.clone(),
-        }
-        .into(),
-    )));
     let output_fs = output_fs(project_dir.clone());
     let project_fs = project_fs(root_dir.clone());
     let project_relative = project_dir.strip_prefix(&*root_dir).unwrap();
@@ -187,33 +190,77 @@ async fn build_internal(
         .unwrap_or(project_relative)
         .replace(MAIN_SEPARATOR, "/")
         .into();
-    let project_path = project_fs.root().join(project_relative);
-    let build_output_root = output_fs.root().join("dist".into());
+    let root_path = project_fs.root().to_resolved().await?;
+    let project_path = root_path.join(project_relative).to_resolved().await?;
+    let build_output_root = output_fs.root().join("dist".into()).to_resolved().await?;
 
     let node_env = NodeEnv::Production.cell();
 
-    let chunking_context = Vc::upcast(
-        NodeJsChunkingContext::builder(
-            project_path,
-            build_output_root,
-            build_output_root,
-            build_output_root,
-            build_output_root,
-            env,
-            match *node_env.await? {
-                NodeEnv::Development => RuntimeType::Development,
-                NodeEnv::Production => RuntimeType::Production,
-            },
-        )
-        .minify_type(minify_type)
-        .build(),
-    );
+    let build_output_root_to_root_path = project_path
+        .join("dist".into())
+        .await?
+        .get_relative_path_to(&*root_path.await?)
+        .context("Project path is in root path")?;
+
+    let runtime_type = match *node_env.await? {
+        NodeEnv::Development => RuntimeType::Development,
+        NodeEnv::Production => RuntimeType::Production,
+    };
+
+    let chunking_context: Vc<Box<dyn ChunkingContext>> = match target {
+        Target::Browser => Vc::upcast(
+            BrowserChunkingContext::builder(
+                project_path,
+                build_output_root,
+                ResolvedVc::cell(build_output_root_to_root_path),
+                build_output_root,
+                build_output_root,
+                build_output_root,
+                Environment::new(Value::new(ExecutionEnvironment::Browser(
+                    BrowserEnvironment {
+                        dom: true,
+                        web_worker: false,
+                        service_worker: false,
+                        browserslist_query: browserslist_query.clone(),
+                    }
+                    .resolved_cell(),
+                )))
+                .to_resolved()
+                .await?,
+                runtime_type,
+            )
+            .minify_type(minify_type)
+            .build(),
+        ),
+        Target::Node => Vc::upcast(
+            NodeJsChunkingContext::builder(
+                project_path,
+                build_output_root,
+                ResolvedVc::cell(build_output_root_to_root_path),
+                build_output_root,
+                build_output_root,
+                build_output_root,
+                Environment::new(Value::new(ExecutionEnvironment::NodeJsLambda(
+                    NodeJsEnvironment::default().resolved_cell(),
+                )))
+                .to_resolved()
+                .await?,
+                runtime_type,
+            )
+            .minify_type(minify_type)
+            .build(),
+        ),
+    };
 
     let compile_time_info = get_client_compile_time_info(browserslist_query, node_env);
     let execution_context =
-        ExecutionContext::new(project_path, chunking_context, load_env(project_path));
-    let asset_context =
-        get_client_asset_context(project_path, execution_context, compile_time_info, node_env);
+        ExecutionContext::new(*root_path, chunking_context, load_env(*root_path));
+    let asset_context = get_client_asset_context(
+        *project_path,
+        execution_context,
+        compile_time_info,
+        node_env,
+    );
 
     let entry_requests = (*entry_requests
         .await?
@@ -239,7 +286,7 @@ async fn build_internal(
         .await?)
         .to_vec();
 
-    let origin = PlainResolveOrigin::new(asset_context, output_fs.root().join("_".into()));
+    let origin = PlainResolveOrigin::new(asset_context, project_fs.root().join("_".into()));
     let project_dir = &project_dir;
     let entries = entry_requests
         .into_iter()
@@ -261,6 +308,8 @@ async fn build_internal(
         .try_join()
         .await?;
 
+    let module_graph = ModuleGraph::from_modules(Vc::cell(entries.clone()));
+
     let entry_chunk_groups = entries
         .into_iter()
         .map(|entry_module| async move {
@@ -268,37 +317,57 @@ async fn build_internal(
                 if let Some(ecmascript) =
                     ResolvedVc::try_sidecast::<Box<dyn EvaluatableAsset>>(entry_module).await?
                 {
-                    Vc::cell(vec![
-                        Vc::try_resolve_downcast_type::<NodeJsChunkingContext>(chunking_context)
-                            .await?
-                            .unwrap()
-                            .entry_chunk_group(
-                                build_output_root
-                                    .join(
-                                        ecmascript
-                                            .ident()
-                                            .path()
-                                            .file_stem()
-                                            .await?
-                                            .as_deref()
-                                            .unwrap()
-                                            .into(),
-                                    )
-                                    .with_extension("entry.js".into()),
-                                *ResolvedVc::upcast(ecmascript),
-                                EvaluatableAssets::one(*ResolvedVc::upcast(ecmascript)),
-                                OutputAssets::empty(),
-                                Value::new(AvailabilityInfo::Root),
-                            )
-                            .await?
-                            .asset,
-                    ])
-                } else if let Some(chunkable) =
-                    ResolvedVc::try_sidecast::<Box<dyn ChunkableModule>>(entry_module).await?
-                {
-                    chunking_context.root_chunk_group_assets(*chunkable)
+                    match target {
+                        Target::Browser => {
+                            chunking_context
+                                .evaluated_chunk_group(
+                                    AssetIdent::from_path(
+                                        build_output_root
+                                            .join(
+                                                ecmascript
+                                                    .ident()
+                                                    .path()
+                                                    .file_stem()
+                                                    .await?
+                                                    .as_deref()
+                                                    .unwrap()
+                                                    .into(),
+                                            )
+                                            .with_extension("entry.js".into()),
+                                    ),
+                                    EvaluatableAssets::one(*ResolvedVc::upcast(ecmascript)),
+                                    module_graph,
+                                    Value::new(AvailabilityInfo::Root),
+                                )
+                                .await?
+                                .assets
+                        }
+                        Target::Node => ResolvedVc::cell(vec![
+                            chunking_context
+                                .entry_chunk_group(
+                                    build_output_root
+                                        .join(
+                                            ecmascript
+                                                .ident()
+                                                .path()
+                                                .file_stem()
+                                                .await?
+                                                .as_deref()
+                                                .unwrap()
+                                                .into(),
+                                        )
+                                        .with_extension("entry.js".into()),
+                                    *ResolvedVc::upcast(ecmascript),
+                                    EvaluatableAssets::one(*ResolvedVc::upcast(ecmascript)),
+                                    module_graph,
+                                    OutputAssets::empty(),
+                                    Value::new(AvailabilityInfo::Root),
+                                )
+                                .await?
+                                .asset,
+                        ]),
+                    }
                 } else {
-                    // TODO convert into a serve-able asset
                     bail!(
                         "Entry module is not chunkable, so it can't be used to bootstrap the \
                          application"
@@ -311,7 +380,7 @@ async fn build_internal(
 
     let mut chunks: HashSet<ResolvedVc<Box<dyn OutputAsset>>> = HashSet::new();
     for chunk_group in entry_chunk_groups {
-        chunks.extend(&*all_assets_from_entries(chunk_group).await?);
+        chunks.extend(&*all_assets_from_entries(*chunk_group).await?);
     }
 
     chunks
@@ -347,6 +416,7 @@ pub async fn build(args: &BuildArguments) -> Result<()> {
         } else {
             MinifyType::Minify
         })
+        .target(args.common.target.unwrap_or(Target::Node))
         .show_all(args.common.show_all);
 
     for entry in normalize_entries(&args.common.entries) {

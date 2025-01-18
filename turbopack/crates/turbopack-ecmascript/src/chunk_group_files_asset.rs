@@ -14,10 +14,9 @@ use turbopack_core::{
         IntrospectableChildren,
     },
     module::Module,
+    module_graph::ModuleGraph,
     output::{OutputAsset, OutputAssets},
-    reference::{
-        ModuleReference, ModuleReferences, SingleModuleReference, SingleOutputAssetReference,
-    },
+    reference::{ModuleReference, ModuleReferences, SingleModuleReference},
 };
 
 use crate::{
@@ -62,17 +61,30 @@ impl Module for ChunkGroupFilesAsset {
 
     #[turbo_tasks::function]
     async fn references(&self) -> Result<Vc<ModuleReferences>> {
-        let mut references: Vec<Vc<Box<dyn ModuleReference>>> = vec![Vc::upcast(
-            SingleModuleReference::new(*ResolvedVc::upcast(self.module), module_description()),
+        let mut references: Vec<ResolvedVc<Box<dyn ModuleReference>>> = vec![ResolvedVc::upcast(
+            SingleModuleReference::new(*ResolvedVc::upcast(self.module), module_description())
+                .to_resolved()
+                .await?,
         )];
 
         if let Some(runtime_entries) = self.runtime_entries {
-            references.extend(runtime_entries.await?.iter().map(|&entry| {
-                Vc::upcast(SingleModuleReference::new(
-                    Vc::upcast(entry),
-                    runtime_entry_description(),
-                ))
-            }));
+            references.extend(
+                runtime_entries
+                    .await?
+                    .iter()
+                    .map(|&entry| async move {
+                        Ok(ResolvedVc::upcast(
+                            SingleModuleReference::new(
+                                Vc::upcast(*entry),
+                                runtime_entry_description(),
+                            )
+                            .to_resolved()
+                            .await?,
+                        ))
+                    })
+                    .try_join()
+                    .await?,
+            );
         }
 
         Ok(Vc::cell(references))
@@ -92,11 +104,13 @@ impl ChunkableModule for ChunkGroupFilesAsset {
     #[turbo_tasks::function]
     async fn as_chunk_item(
         self: ResolvedVc<Self>,
+        module_graph: ResolvedVc<ModuleGraph>,
         chunking_context: ResolvedVc<Box<dyn ChunkingContext>>,
     ) -> Result<Vc<Box<dyn turbopack_core::chunk::ChunkItem>>> {
         let this = self.await?;
         Ok(Vc::upcast(
             ChunkGroupFilesChunkItem {
+                module_graph,
                 chunking_context,
                 client_root: this.client_root,
                 inner: self,
@@ -117,6 +131,7 @@ impl EcmascriptChunkPlaceable for ChunkGroupFilesAsset {
 #[turbo_tasks::value]
 struct ChunkGroupFilesChunkItem {
     chunking_context: ResolvedVc<Box<dyn ChunkingContext>>,
+    module_graph: ResolvedVc<ModuleGraph>,
     client_root: ResolvedVc<FileSystemPath>,
     inner: ResolvedVc<ChunkGroupFilesAsset>,
 }
@@ -137,12 +152,13 @@ impl ChunkGroupFilesChunkItem {
                     .copied()
                     .unwrap_or_else(EvaluatableAssets::empty)
                     .with_entry(*ecma),
+                *self.module_graph,
                 Value::new(AvailabilityInfo::Root),
             )
         } else {
             inner
                 .chunking_context
-                .root_chunk_group_assets(*ResolvedVc::upcast(inner.module))
+                .root_chunk_group_assets(*ResolvedVc::upcast(inner.module), *self.module_graph)
         };
         Ok(chunks)
     }
@@ -196,23 +212,8 @@ impl ChunkItem for ChunkGroupFilesChunkItem {
     }
 
     #[turbo_tasks::function]
-    async fn references(self: Vc<Self>) -> Result<Vc<ModuleReferences>> {
-        let chunks = self.chunks();
-
-        Ok(Vc::cell(
-            chunks
-                .await?
-                .iter()
-                .copied()
-                .map(|chunk| {
-                    SingleOutputAssetReference::new(
-                        *chunk,
-                        chunk_group_chunk_reference_description(),
-                    )
-                })
-                .map(Vc::upcast)
-                .collect(),
-        ))
+    fn references(self: Vc<Self>) -> Vc<OutputAssets> {
+        self.chunks()
     }
 
     #[turbo_tasks::function]
@@ -251,12 +252,14 @@ impl Introspectable for ChunkGroupFilesAsset {
     }
 
     #[turbo_tasks::function]
-    fn children(&self) -> Vc<IntrospectableChildren> {
+    async fn children(&self) -> Result<Vc<IntrospectableChildren>> {
         let mut children = FxIndexSet::default();
         children.insert((
-            Vc::cell("inner asset".into()),
-            IntrospectableModule::new(*ResolvedVc::upcast(self.module)),
+            ResolvedVc::cell("inner asset".into()),
+            IntrospectableModule::new(*ResolvedVc::upcast(self.module))
+                .to_resolved()
+                .await?,
         ));
-        Vc::cell(children)
+        Ok(Vc::cell(children))
     }
 }

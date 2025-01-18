@@ -26,7 +26,7 @@ import _pkg from 'next/package.json'
 import type { SpawnOptions, ChildProcess } from 'child_process'
 import type { RequestInit, Response } from 'node-fetch'
 import type { NextServer } from 'next/dist/server/next'
-import type { BrowserInterface } from './browsers/base'
+import { BrowserInterface } from './browsers/base'
 
 import { getTurbopackFlag, shouldRunTurboDevTest } from './turbo'
 import stripAnsi from 'strip-ansi'
@@ -919,7 +919,7 @@ export function getRedboxHeader(browser: BrowserInterface) {
 
 export async function getRedboxTotalErrorCount(browser: BrowserInterface) {
   const header = (await getRedboxHeader(browser)) || ''
-  return parseInt(header.match(/\d+ of (\d+) error/)?.[1], 10)
+  return parseInt(header.match(/\d+ of (\d+) issue/)?.[1], 10)
 }
 
 export function getRedboxSource(browser: BrowserInterface) {
@@ -1234,6 +1234,17 @@ export async function toggleCollapseComponentStack(
     .click()
 }
 
+export async function hasRedboxCallStack(browser: BrowserInterface) {
+  return browser.eval(() => {
+    const portal = [].slice
+      .call(document.querySelectorAll('nextjs-portal'))
+      .find((p) => p.shadowRoot.querySelector('[data-nextjs-dialog-body]'))
+    const root = portal?.shadowRoot
+
+    return root?.querySelectorAll('[data-nextjs-call-stack-frame]').length > 0
+  })
+}
+
 export async function getRedboxCallStack(
   browser: BrowserInterface
 ): Promise<string | null> {
@@ -1499,4 +1510,54 @@ export async function getStackFramesContent(browser) {
     .join('\n')
 
   return stackFramesContent
+}
+
+export async function toggleCollapseCallStackFrames(browser: BrowserInterface) {
+  const button = await browser.elementByCss('[data-expand-ignore-button]')
+  const lastExpanded = await button.getAttribute('data-expand-ignore-button')
+  await button.click()
+
+  await retry(async () => {
+    const currExpanded = await button.getAttribute('data-expand-ignore-button')
+    expect(currExpanded).not.toBe(lastExpanded)
+  })
+}
+
+/**
+ * Encodes the params into a URLSearchParams object using the format that the
+ * now builder uses for route matches (adding the `nxtP` prefix to the keys).
+ *
+ * @param params - The params to encode.
+ * @param extraQueryParams - The extra query params to encode (without the `nxtP` prefix).
+ * @returns The encoded URLSearchParams object.
+ */
+export function createNowRouteMatches(
+  params: Record<string, string>,
+  extraQueryParams: Record<string, string> = {}
+): URLSearchParams {
+  const urlSearchParams = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    urlSearchParams.append(`nxtP${key}`, value)
+  }
+  for (const [key, value] of Object.entries(extraQueryParams)) {
+    urlSearchParams.append(key, value)
+  }
+
+  return urlSearchParams
+}
+
+export async function assertNoConsoleErrors(browser: BrowserInterface) {
+  const logs = await browser.log()
+  const warningsAndErrors = logs.filter((log) => {
+    return (
+      log.source === 'warning' ||
+      (log.source === 'error' &&
+        // These are expected when we visit 404 pages.
+        !log.message.startsWith(
+          'Failed to load resource: the server responded with a status of 404'
+        ))
+    )
+  })
+
+  expect(warningsAndErrors).toEqual([])
 }

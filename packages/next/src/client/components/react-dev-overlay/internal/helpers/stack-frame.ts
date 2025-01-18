@@ -58,12 +58,7 @@ function getOriginalStackFrame(
   }
 
   // TODO: merge this section into ignoredList handling
-  if (
-    source.file === '<anonymous>' ||
-    source.file === 'file://' ||
-    source.file?.match(/^node:/) ||
-    source.file?.match(/https?:\/\//)
-  ) {
+  if (source.file === 'file://' || source.file?.match(/https?:\/\//)) {
     return Promise.resolve({
       error: false,
       reason: null,
@@ -136,11 +131,6 @@ export function getFrameSource(frame: StackFrame): string {
   }
 
   if (!isWebpackInternalResource(frame.file) && frame.lineNumber != null) {
-    // If the method name is replayed from server, e.g. Page [Server],
-    // and it's formatted to empty string, recover it as <anonymous> to display it.
-    if (!str && frame.methodName.endsWith(' [Server]')) {
-      str = '<anonymous>'
-    }
     if (str) {
       if (frame.column != null) {
         str += ` (${frame.lineNumber}:${frame.column})`

@@ -42,6 +42,7 @@ export const EXPORT_DETAIL = 'export-detail.json'
 export const PRERENDER_MANIFEST = 'prerender-manifest.json'
 export const ROUTES_MANIFEST = 'routes-manifest.json'
 export const IMAGES_MANIFEST = 'images-manifest.json'
+export const RESPONSE_CONFIG_MANIFEST = 'response-config-manifest.json'
 export const SERVER_FILES_MANIFEST = 'required-server-files.json'
 export const DEV_CLIENT_PAGES_MANIFEST = '_devPagesManifest.json'
 export const MIDDLEWARE_MANIFEST = 'middleware-manifest.json'
@@ -75,6 +76,8 @@ export const MIDDLEWARE_REACT_LOADABLE_MANIFEST =
 // server/interception-route-rewrite-manifest.js
 export const INTERCEPTION_ROUTE_REWRITE_MANIFEST =
   'interception-route-rewrite-manifest'
+// server/dynamic-css-manifest.js
+export const DYNAMIC_CSS_MANIFEST = 'dynamic-css-manifest'
 
 // static/runtime/main.js
 export const CLIENT_STATIC_FILES_RUNTIME_MAIN = `main`

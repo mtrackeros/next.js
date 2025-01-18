@@ -23,8 +23,12 @@ export type PackageJson = {
   dependencies?: { [key: string]: string }
   [key: string]: unknown
 }
+
+type ResolvedFileConfig = FileRef | { [filename: string]: string | FileRef }
+type FilesConfig = ResolvedFileConfig | string
 export interface NextInstanceOpts {
-  files: FileRef | string | { [filename: string]: string | FileRef }
+  files: FilesConfig
+  overrideFiles?: FilesConfig
   dependencies?: { [name: string]: string }
   resolutions?: { [name: string]: string }
   packageJson?: PackageJson
@@ -52,10 +56,11 @@ type OmitFirstArgument<F> = F extends (
 
 // Do not rename or format. sync-react script relies on this line.
 // prettier-ignore
-const nextjsReactPeerVersion = "19.0.0-rc-b01722d5-20241114";
+const nextjsReactPeerVersion = "^19.0.0";
 
 export class NextInstance {
-  protected files: FileRef | { [filename: string]: string | FileRef }
+  protected files: ResolvedFileConfig
+  protected overrideFiles: ResolvedFileConfig
   protected nextConfig?: NextConfig
   protected installCommand?: InstallCommand
   protected buildCommand?: string
@@ -64,6 +69,7 @@ export class NextInstance {
   protected resolutions?: PackageJson['resolutions']
   protected events: { [eventName: string]: Set<any> } = {}
   public testDir: string
+  tmpRepoDir: string
   protected isStopping: boolean = false
   protected isDestroyed: boolean = false
   protected childProcess?: ChildProcess
@@ -95,10 +101,10 @@ export class NextInstance {
     }
   }
 
-  protected async writeInitialFiles() {
+  private async writeFiles(filesConfig: FilesConfig, testDir: string) {
     // Handle case where files is a directory string
     const files =
-      typeof this.files === 'string' ? new FileRef(this.files) : this.files
+      typeof filesConfig === 'string' ? new FileRef(filesConfig) : filesConfig
     if (files instanceof FileRef) {
       // if a FileRef is passed directly to `files` we copy the
       // entire folder to the test directory
@@ -110,7 +116,7 @@ export class NextInstance {
         )
       }
 
-      await fs.cp(files.fsPath, this.testDir, {
+      await fs.cp(files.fsPath, testDir, {
         recursive: true,
         filter(source) {
           // we don't copy a package.json as it's manually written
@@ -124,7 +130,7 @@ export class NextInstance {
     } else {
       for (const filename of Object.keys(files)) {
         const item = files[filename]
-        const outputFilename = path.join(this.testDir, filename)
+        const outputFilename = path.join(testDir, filename)
 
         if (typeof item === 'string') {
           await fs.mkdir(path.dirname(outputFilename), { recursive: true })
@@ -133,6 +139,16 @@ export class NextInstance {
           await fs.cp(item.fsPath, outputFilename, { recursive: true })
         }
       }
+    }
+  }
+
+  protected async writeInitialFiles() {
+    return this.writeFiles(this.files, this.testDir)
+  }
+
+  protected async writeOverrideFiles() {
+    if (this.overrideFiles) {
+      return this.writeFiles(this.overrideFiles, this.testDir)
     }
   }
 
@@ -220,16 +236,17 @@ export class NextInstance {
               recursive: true,
             })
           } else {
-            const { installDir } = await createNextInstall({
+            const { installDir, tmpRepoDir } = await createNextInstall({
               parentSpan: rootSpan,
               dependencies: finalDependencies,
               resolutions: this.resolutions ?? null,
               installCommand: this.installCommand,
               packageJson: this.packageJson,
               dirSuffix: this.dirSuffix,
-              keepRepoDir: Boolean(process.env.NEXT_TEST_SKIP_CLEANUP),
+              keepRepoDir: true,
             })
             this.testDir = installDir
+            this.tmpRepoDir = tmpRepoDir
           }
           require('console').log('created next.js install, writing test files')
         }
@@ -238,6 +255,12 @@ export class NextInstance {
           .traceChild('writeInitialFiles')
           .traceAsyncFn(async () => {
             await this.writeInitialFiles()
+          })
+
+        await rootSpan
+          .traceChild('writeOverrideFiles')
+          .traceAsyncFn(async () => {
+            await this.writeOverrideFiles()
           })
 
         const testDirFiles = await fs.readdir(this.testDir)
@@ -398,19 +421,28 @@ export class NextInstance {
 
   public async start(useDirArg: boolean = false): Promise<void> {}
 
-  public async stop(): Promise<void> {
+  public async stop(
+    signal: 'SIGINT' | 'SIGTERM' | 'SIGKILL' = 'SIGKILL'
+  ): Promise<void> {
     if (this.childProcess) {
+      if (this.isStopping) {
+        // warn for debugging, but don't prevent sending two signals in succession
+        // (e.g. SIGINT and then SIGKILL)
+        require('console').error(
+          `Next server is already being stopped (received signal: ${signal})`
+        )
+      }
       this.isStopping = true
       const closePromise = once(this.childProcess, 'close')
       await new Promise<void>((resolve) => {
-        treeKill(this.childProcess.pid, 'SIGKILL', (err) => {
+        treeKill(this.childProcess.pid, signal, (err) => {
           if (err) {
             require('console').error('tree-kill', err)
           }
           resolve()
         })
       })
-      this.childProcess.kill('SIGKILL')
+      this.childProcess.kill(signal)
       await closePromise
       this.childProcess = undefined
       this.isStopping = false
@@ -454,6 +486,9 @@ export class NextInstance {
       if (!process.env.NEXT_TEST_SKIP_CLEANUP) {
         // Faster than `await fs.rm`. Benchmark before change.
         rmSync(this.testDir, { recursive: true, force: true })
+        if (this.tmpRepoDir) {
+          rmSync(this.tmpRepoDir, { recursive: true, force: true })
+        }
       }
       require('console').timeEnd(`destroyed next instance`)
     } catch (err) {

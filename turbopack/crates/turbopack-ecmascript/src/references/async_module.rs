@@ -6,12 +6,11 @@ use swc_core::{
     quote,
 };
 use turbo_tasks::{
-    trace::TraceRawVcs, FxIndexSet, ReadRef, TryFlatJoinIterExt, TryJoinIterExt, Vc,
+    trace::TraceRawVcs, FxIndexSet, NonLocalValue, ReadRef, ResolvedVc, TryFlatJoinIterExt,
+    TryJoinIterExt, Vc,
 };
 use turbopack_core::{
-    chunk::{
-        AsyncModuleInfo, ChunkableModule, ChunkableModuleReference, ChunkingContext, ChunkingType,
-    },
+    chunk::{AsyncModuleInfo, ChunkableModuleReference, ChunkingType},
     reference::{ModuleReference, ModuleReferences},
     resolve::ExternalType,
 };
@@ -21,7 +20,9 @@ use crate::code_gen::{CodeGeneration, CodeGenerationHoistedStmt};
 
 /// Information needed for generating the async module wrapper for
 /// [EcmascriptChunkItem](crate::chunk::EcmascriptChunkItem)s.
-#[derive(PartialEq, Eq, Default, Debug, Clone, Serialize, Deserialize, TraceRawVcs)]
+#[derive(
+    PartialEq, Eq, Default, Debug, Clone, Serialize, Deserialize, TraceRawVcs, NonLocalValue,
+)]
 pub struct AsyncModuleOptions {
     pub has_top_level_await: bool,
 }
@@ -51,7 +52,7 @@ pub struct AsyncModule {
 
 /// Option<[AsyncModule]>.
 #[turbo_tasks::value(transparent)]
-pub struct OptionAsyncModule(Option<Vc<AsyncModule>>);
+pub struct OptionAsyncModule(Option<ResolvedVc<AsyncModule>>);
 
 #[turbo_tasks::value_impl]
 impl OptionAsyncModule {
@@ -83,7 +84,7 @@ async fn get_inherit_async_referenced_asset(
     let Some(r) = Vc::try_resolve_downcast::<Box<dyn ChunkableModuleReference>>(r).await? else {
         return Ok(None);
     };
-    let Some(ty) = *r.chunking_type().await? else {
+    let Some(ty) = &*r.chunking_type().await? else {
         return Ok(None);
     };
     if !matches!(ty, ChunkingType::ParallelInheritAsync) {
@@ -99,7 +100,6 @@ impl AsyncModule {
     #[turbo_tasks::function]
     async fn get_async_idents(
         &self,
-        chunking_context: Vc<Box<dyn ChunkingContext>>,
         async_module_info: Vc<AsyncModuleInfo>,
         references: Vc<ModuleReferences>,
     ) -> Result<Vc<AsyncModuleIdents>> {
@@ -109,7 +109,7 @@ impl AsyncModule {
             .await?
             .iter()
             .map(|r| async {
-                let Some(referenced_asset) = get_inherit_async_referenced_asset(*r).await? else {
+                let Some(referenced_asset) = get_inherit_async_referenced_asset(**r).await? else {
                     return Ok(None);
                 };
                 Ok(match &*referenced_asset {
@@ -121,13 +121,9 @@ impl AsyncModule {
                         }
                     }
                     ReferencedAsset::Some(placeable) => {
-                        let chunk_item = placeable
-                            .as_chunk_item(Vc::upcast(chunking_context))
-                            .to_resolved()
-                            .await?;
                         if async_module_info
                             .referenced_async_modules
-                            .contains(&chunk_item)
+                            .contains(&ResolvedVc::upcast(*placeable))
                         {
                             referenced_asset.get_ident().await?
                         } else {
@@ -156,7 +152,8 @@ impl AsyncModule {
                     .await?
                     .iter()
                     .map(|r| async {
-                        let Some(referenced_asset) = get_inherit_async_referenced_asset(*r).await?
+                        let Some(referenced_asset) =
+                            get_inherit_async_referenced_asset(**r).await?
                         else {
                             return Ok(false);
                         };
@@ -190,14 +187,11 @@ impl AsyncModule {
     #[turbo_tasks::function]
     pub async fn code_generation(
         self: Vc<Self>,
-        chunking_context: Vc<Box<dyn ChunkingContext>>,
         async_module_info: Option<Vc<AsyncModuleInfo>>,
         references: Vc<ModuleReferences>,
     ) -> Result<Vc<CodeGeneration>> {
         if let Some(async_module_info) = async_module_info {
-            let async_idents = self
-                .get_async_idents(chunking_context, async_module_info, references)
-                .await?;
+            let async_idents = self.get_async_idents(async_module_info, references).await?;
 
             if !async_idents.is_empty() {
                 let idents = async_idents

@@ -109,13 +109,14 @@ function getImageConfig(
     'process.env.__NEXT_IMAGE_OPTS': {
       deviceSizes: config.images.deviceSizes,
       imageSizes: config.images.imageSizes,
+      qualities: config.images.qualities,
       path: config.images.path,
       loader: config.images.loader,
       dangerouslyAllowSVG: config.images.dangerouslyAllowSVG,
       unoptimized: config?.images?.unoptimized,
       ...(dev
         ? {
-            // pass domains in development to allow validating on the client
+            // additional config in dev to allow validating on the client
             domains: config.images.domains,
             remotePatterns: config.images?.remotePatterns,
             localPatterns: config.images?.localPatterns,
@@ -188,7 +189,6 @@ export function getDefineEnv({
     ),
     'process.env.__NEXT_PPR': isPPREnabled,
     'process.env.__NEXT_DYNAMIC_IO': isDynamicIOEnabled,
-    'process.env.__NEXT_AFTER': config.experimental.after ?? false,
     'process.env.NEXT_DEPLOYMENT_ID': config.deploymentId || false,
     'process.env.__NEXT_FETCH_CACHE_KEY_PREFIX': fetchCacheKeyPrefix ?? '',
     ...(isTurbopack
@@ -207,9 +207,6 @@ export function getDefineEnv({
       isNaN(Number(config.experimental.staleTimes?.static))
         ? 5 * 60 // 5 minutes
         : config.experimental.staleTimes?.static
-    ),
-    'process.env.__NEXT_FLYING_SHUTTLE': Boolean(
-      config.experimental.flyingShuttle
     ),
     'process.env.__NEXT_CLIENT_ROUTER_FILTER_ENABLED':
       config.experimental.clientRouterFilter ?? true,
@@ -292,6 +289,8 @@ export function getDefineEnv({
             needsExperimentalReact(config),
         }
       : undefined),
+    'process.env.__NEXT_EXPERIMENTAL_NEW_DEV_OVERLAY':
+      config.experimental.newDevOverlay ?? false,
   }
 
   const userDefines = config.compiler?.define ?? {}
@@ -304,22 +303,7 @@ export function getDefineEnv({
     defineEnv[key] = userDefines[key]
   }
 
-  const serializedDefineEnv = serializeDefineEnv(defineEnv)
-
-  if (!dev && Boolean(config.experimental.flyingShuttle)) {
-    // we delay inlining these values until after the build
-    // with flying shuttle enabled so we can update them
-    // without invalidating entries
-    for (const key in nextPublicEnv) {
-      serializedDefineEnv[key] = key
-    }
-
-    for (const key in nextConfigEnv) {
-      serializedDefineEnv[key] = key
-    }
-  }
-
-  return serializedDefineEnv
+  return serializeDefineEnv(defineEnv)
 }
 
 export function getDefineEnvPlugin(options: DefineEnvPluginOptions) {

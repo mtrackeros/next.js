@@ -10,7 +10,6 @@ import {
 import type { Revalidate } from '../revalidate'
 import type { DeepReadonly } from '../../../shared/lib/deep-readonly'
 
-import FetchCache from './fetch-cache'
 import FileSystemCache from './file-system-cache'
 import { normalizePagePath } from '../../../shared/lib/page-path/normalize-page-path'
 
@@ -22,7 +21,7 @@ import {
 } from '../../../lib/constants'
 import { toRoute } from '../to-route'
 import { SharedRevalidateTimings } from './shared-revalidate-timings'
-import { workUnitAsyncStorage } from '../../app-render/work-unit-async-storage-instance'
+import { workUnitAsyncStorageInstance } from '../../app-render/work-unit-async-storage-instance'
 import {
   getPrerenderResumeDataCache,
   getRenderResumeDataCache,
@@ -96,7 +95,6 @@ export class IncrementalCache implements IncrementalCacheType {
     dev,
     dynamicIO,
     flushToDisk,
-    fetchCache,
     minimalMode,
     serverDistDir,
     requestHeaders,
@@ -110,7 +108,6 @@ export class IncrementalCache implements IncrementalCacheType {
     fs?: CacheFs
     dev: boolean
     dynamicIO: boolean
-    fetchCache?: boolean
     minimalMode?: boolean
     serverDistDir?: string
     flushToDisk?: boolean
@@ -144,16 +141,6 @@ export class IncrementalCache implements IncrementalCacheType {
             console.log('using filesystem cache handler')
           }
           CurCacheHandler = FileSystemCache
-        }
-        if (
-          FetchCache.isAvailable({ _requestHeaders: requestHeaders }) &&
-          minimalMode &&
-          fetchCache
-        ) {
-          if (debug) {
-            console.log('using fetch cache handler')
-          }
-          CurCacheHandler = FetchCache
         }
       }
     } else if (debug) {
@@ -262,7 +249,22 @@ export class IncrementalCache implements IncrementalCacheType {
   }
 
   async revalidateTag(tags: string | string[]): Promise<void> {
-    return this.cacheHandler?.revalidateTag?.(tags)
+    const _globalThis: typeof globalThis & {
+      __nextCacheHandlers?: Record<
+        string,
+        import('../cache-handlers/types').CacheHandler
+      >
+    } = globalThis
+
+    return Promise.all([
+      // call expireTags on all configured cache handlers
+      Object.values(_globalThis.__nextCacheHandlers || {}).map(
+        (cacheHandler) =>
+          typeof cacheHandler.expireTags === 'function' &&
+          cacheHandler.expireTags(...(Array.isArray(tags) ? tags : [tags]))
+      ),
+      this.cacheHandler?.revalidateTag?.(tags),
+    ]).then(() => {})
   }
 
   // x-ref: https://github.com/facebook/react/blob/2655c9354d8e1c54ba888444220f63e836925caa/packages/react/src/ReactFetch.js#L23
@@ -405,7 +407,7 @@ export class IncrementalCache implements IncrementalCacheType {
     // unlike other caches if we have a cacheScope we use it even if
     // testmode would normally disable it or if requestHeaders say 'no-cache'.
     if (this.hasDynamicIO && ctx.kind === IncrementalCacheKind.FETCH) {
-      const workUnitStore = workUnitAsyncStorage.getStore()
+      const workUnitStore = workUnitAsyncStorageInstance.getStore()
       const resumeDataCache = workUnitStore
         ? getRenderResumeDataCache(workUnitStore)
         : null
@@ -550,7 +552,7 @@ export class IncrementalCache implements IncrementalCacheType {
     // is a transient in memory cache that populates caches ahead of a dynamic render in dev mode
     // to allow the RSC debug info to have the right environment associated to it.
     if (this.hasDynamicIO && data?.kind === CachedRouteKind.FETCH) {
-      const workUnitStore = workUnitAsyncStorage.getStore()
+      const workUnitStore = workUnitAsyncStorageInstance.getStore()
       const prerenderResumeDataCache = workUnitStore
         ? getPrerenderResumeDataCache(workUnitStore)
         : null

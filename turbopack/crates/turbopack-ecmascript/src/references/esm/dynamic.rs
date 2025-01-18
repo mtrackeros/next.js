@@ -10,14 +10,20 @@ use turbopack_core::{
     chunk::{ChunkableModuleReference, ChunkingContext, ChunkingType, ChunkingTypeOption},
     environment::ChunkLoading,
     issue::IssueSource,
+    module_graph::ModuleGraph,
     reference::ModuleReference,
     reference_type::EcmaScriptModulesReferenceSubType,
-    resolve::{origin::ResolveOrigin, parse::Request, ModuleResolveResult},
+    resolve::{
+        origin::{ResolveOrigin, ResolveOriginExt},
+        parse::Request,
+        ModuleResolveResult,
+    },
 };
 use turbopack_resolve::ecmascript::esm_resolve;
 
 use super::super::pattern_mapping::{PatternMapping, ResolveType};
 use crate::{
+    analyzer::imports::ImportAnnotations,
     code_gen::{CodeGenerateable, CodeGeneration},
     create_visitor,
     references::AstPath,
@@ -29,9 +35,20 @@ pub struct EsmAsyncAssetReference {
     pub origin: ResolvedVc<Box<dyn ResolveOrigin>>,
     pub request: ResolvedVc<Request>,
     pub path: ResolvedVc<AstPath>,
+    pub annotations: ImportAnnotations,
     pub issue_source: ResolvedVc<IssueSource>,
     pub in_try: bool,
     pub import_externals: bool,
+}
+
+impl EsmAsyncAssetReference {
+    fn get_origin(&self) -> Vc<Box<dyn ResolveOrigin>> {
+        if let Some(transition) = self.annotations.transition() {
+            self.origin.with_transition(transition.into())
+        } else {
+            *self.origin
+        }
+    }
 }
 
 #[turbo_tasks::value_impl]
@@ -42,6 +59,7 @@ impl EsmAsyncAssetReference {
         request: ResolvedVc<Request>,
         path: ResolvedVc<AstPath>,
         issue_source: ResolvedVc<IssueSource>,
+        annotations: Value<ImportAnnotations>,
         in_try: bool,
         import_externals: bool,
     ) -> Vc<Self> {
@@ -50,6 +68,7 @@ impl EsmAsyncAssetReference {
             request,
             path,
             issue_source,
+            annotations: annotations.into_value(),
             in_try,
             import_externals,
         })
@@ -59,14 +78,14 @@ impl EsmAsyncAssetReference {
 #[turbo_tasks::value_impl]
 impl ModuleReference for EsmAsyncAssetReference {
     #[turbo_tasks::function]
-    fn resolve_reference(&self) -> Vc<ModuleResolveResult> {
-        esm_resolve(
-            *self.origin,
+    async fn resolve_reference(&self) -> Result<Vc<ModuleResolveResult>> {
+        Ok(esm_resolve(
+            self.get_origin().resolve().await?,
             *self.request,
             Value::new(EcmaScriptModulesReferenceSubType::DynamicImport),
             self.in_try,
             Some(*self.issue_source),
-        )
+        ))
     }
 }
 
@@ -93,14 +112,16 @@ impl CodeGenerateable for EsmAsyncAssetReference {
     #[turbo_tasks::function]
     async fn code_generation(
         &self,
+        module_graph: Vc<ModuleGraph>,
         chunking_context: Vc<Box<dyn ChunkingContext>>,
     ) -> Result<Vc<CodeGeneration>> {
         let pm = PatternMapping::resolve_request(
             *self.request,
             *self.origin,
+            module_graph,
             Vc::upcast(chunking_context),
             esm_resolve(
-                *self.origin,
+                self.get_origin().resolve().await?,
                 *self.request,
                 Value::new(EcmaScriptModulesReferenceSubType::DynamicImport),
                 self.in_try,

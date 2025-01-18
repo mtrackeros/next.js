@@ -4,7 +4,7 @@ use anyhow::Result;
 use turbo_rcstr::RcStr;
 use turbo_tasks::{FxIndexMap, ResolvedVc, Value, Vc};
 use turbo_tasks_env::EnvMap;
-use turbo_tasks_fs::{FileSystem, FileSystemPath};
+use turbo_tasks_fs::FileSystemPath;
 use turbopack::{
     module_options::{
         module_options_context::ModuleOptionsContext, CssOptionsContext, EcmascriptOptionsContext,
@@ -19,7 +19,6 @@ use turbopack_core::{
         CompileTimeDefineValue, CompileTimeDefines, CompileTimeInfo, DefineableNameSegment,
         FreeVarReference, FreeVarReferences,
     },
-    condition::ContextCondition,
     environment::{BrowserEnvironment, Environment, ExecutionEnvironment},
     free_var_references,
     resolve::{parse::Request, pattern::Pattern},
@@ -31,7 +30,6 @@ use turbopack_node::{
 
 use super::transforms::get_next_client_transforms_rules;
 use crate::{
-    embed_js::next_js_fs,
     mode::NextMode,
     next_build::get_postcss_package_mapping,
     next_client::runtime_entry::{RuntimeEntries, RuntimeEntry},
@@ -60,7 +58,7 @@ use crate::{
         get_decorators_transform_options, get_jsx_transform_options,
         get_typescript_transform_options,
     },
-    util::foreign_code_context_condition,
+    util::{foreign_code_context_condition, internal_assets_conditions},
 };
 
 fn defines(define_env: &FxIndexMap<RcStr, RcStr>) -> CompileTimeDefines {
@@ -110,22 +108,27 @@ async fn next_client_free_vars(define_env: Vc<EnvMap>) -> Result<Vc<FreeVarRefer
 }
 
 #[turbo_tasks::function]
-pub fn get_client_compile_time_info(
+pub async fn get_client_compile_time_info(
     browserslist_query: RcStr,
     define_env: Vc<EnvMap>,
-) -> Vc<CompileTimeInfo> {
-    CompileTimeInfo::builder(Environment::new(Value::new(ExecutionEnvironment::Browser(
-        BrowserEnvironment {
-            dom: true,
-            web_worker: false,
-            service_worker: false,
-            browserslist_query: browserslist_query.to_owned(),
-        }
-        .into(),
-    ))))
-    .defines(next_client_defines(define_env))
-    .free_var_references(next_client_free_vars(define_env))
+) -> Result<Vc<CompileTimeInfo>> {
+    CompileTimeInfo::builder(
+        Environment::new(Value::new(ExecutionEnvironment::Browser(
+            BrowserEnvironment {
+                dom: true,
+                web_worker: false,
+                service_worker: false,
+                browserslist_query: browserslist_query.to_owned(),
+            }
+            .resolved_cell(),
+        )))
+        .to_resolved()
+        .await?,
+    )
+    .defines(next_client_defines(define_env).to_resolved().await?)
+    .free_var_references(next_client_free_vars(define_env).to_resolved().await?)
     .cell()
+    .await
 }
 
 #[turbo_tasks::value(shared, serialization = "auto_for_input")]
@@ -207,14 +210,6 @@ pub async fn get_client_resolve_options_context(
     .cell())
 }
 
-fn internal_assets_conditions() -> ContextCondition {
-    ContextCondition::any(vec![
-        ContextCondition::InPath(next_js_fs().root()),
-        ContextCondition::InPath(turbopack_ecmascript_runtime::embed_fs().root()),
-        ContextCondition::InPath(turbopack_node::embed_js::embed_fs().root()),
-    ])
-}
-
 #[turbo_tasks::function]
 pub async fn get_client_module_options_context(
     project_path: ResolvedVc<FileSystemPath>,
@@ -223,6 +218,7 @@ pub async fn get_client_module_options_context(
     ty: Value<ClientContextType>,
     mode: Vc<NextMode>,
     next_config: Vc<NextConfig>,
+    encryption_key: ResolvedVc<RcStr>,
 ) -> Result<Vc<ModuleOptionsContext>> {
     let next_mode = mode.await?;
     let resolve_options_context = get_client_resolve_options_context(
@@ -278,9 +274,11 @@ pub async fn get_client_module_options_context(
     let target_browsers = env.runtime_versions();
 
     let mut next_client_rules =
-        get_next_client_transforms_rules(next_config, ty.into_value(), mode, false).await?;
+        get_next_client_transforms_rules(next_config, ty.into_value(), mode, false, encryption_key)
+            .await?;
     let foreign_next_client_rules =
-        get_next_client_transforms_rules(next_config, ty.into_value(), mode, true).await?;
+        get_next_client_transforms_rules(next_config, ty.into_value(), mode, true, encryption_key)
+            .await?;
     let additional_rules: Vec<ModuleRule> = vec![
         get_swc_ecma_transform_plugin_rule(next_config, project_path).await?,
         get_relay_transform_rule(next_config, project_path).await?,
@@ -379,7 +377,7 @@ pub async fn get_client_module_options_context(
                 foreign_codes_options_context.resolved_cell(),
             ),
             (
-                internal_assets_conditions(),
+                internal_assets_conditions().await?,
                 internal_context.resolved_cell(),
             ),
         ],
@@ -393,21 +391,26 @@ pub async fn get_client_module_options_context(
 
 #[turbo_tasks::function]
 pub async fn get_client_chunking_context(
-    project_path: Vc<FileSystemPath>,
-    client_root: Vc<FileSystemPath>,
-    asset_prefix: Vc<Option<RcStr>>,
-    environment: Vc<Environment>,
+    root_path: ResolvedVc<FileSystemPath>,
+    client_root: ResolvedVc<FileSystemPath>,
+    client_root_to_root_path: ResolvedVc<RcStr>,
+    asset_prefix: ResolvedVc<Option<RcStr>>,
+    environment: ResolvedVc<Environment>,
     mode: Vc<NextMode>,
-    module_id_strategy: Vc<Box<dyn ModuleIdStrategy>>,
+    module_id_strategy: ResolvedVc<Box<dyn ModuleIdStrategy>>,
     turbo_minify: Vc<bool>,
 ) -> Result<Vc<Box<dyn ChunkingContext>>> {
     let next_mode = mode.await?;
     let mut builder = BrowserChunkingContext::builder(
-        project_path,
+        root_path,
         client_root,
+        client_root_to_root_path,
         client_root,
-        client_root.join("static/chunks".into()),
-        get_client_assets_path(client_root),
+        client_root
+            .join("static/chunks".into())
+            .to_resolved()
+            .await?,
+        get_client_assets_path(*client_root).to_resolved().await?,
         environment,
         next_mode.runtime_type(),
     )
@@ -455,8 +458,11 @@ pub async fn get_client_runtime_entries(
         // functions to be available.
         if let Some(request) = enable_react_refresh {
             runtime_entries.push(
-                RuntimeEntry::Request(request.to_resolved().await?, project_root.join("_".into()))
-                    .cell(),
+                RuntimeEntry::Request(
+                    request.to_resolved().await?,
+                    project_root.join("_".into()).to_resolved().await?,
+                )
+                .resolved_cell(),
             )
         };
     }
@@ -469,9 +475,9 @@ pub async fn get_client_runtime_entries(
                 )))
                 .to_resolved()
                 .await?,
-                project_root.join("_".into()),
+                project_root.join("_".into()).to_resolved().await?,
             )
-            .cell(),
+            .resolved_cell(),
         );
     }
 

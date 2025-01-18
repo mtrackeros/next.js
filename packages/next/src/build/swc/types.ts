@@ -27,8 +27,6 @@ export interface Binding {
 
   initCustomTraceSubscriber?(traceOutFilePath?: string): ExternalObject<RefCell>
   teardownTraceSubscriber?(guardExternal: ExternalObject<RefCell>): void
-  initHeapProfiler?(): ExternalObject<RefCell>
-  teardownHeapProfiler?(guardExternal: ExternalObject<RefCell>): void
   css: {
     lightning: {
       transform(transformOptions: any): Promise<any>
@@ -169,6 +167,7 @@ export interface TurbopackStackFrame {
   isServer: boolean
   isInternal?: boolean
   file: string
+  originalFile?: string
   /** 1-indexed, unlike source map tokens */
   line?: number
   /** 1-indexed, unlike source map tokens */
@@ -204,9 +203,11 @@ export interface Project {
   getSourceForAsset(filePath: string): Promise<string | null>
 
   getSourceMap(filePath: string): Promise<string | null>
+  getSourceMapSync(filePath: string): string | null
 
   traceSource(
-    stackFrame: TurbopackStackFrame
+    stackFrame: TurbopackStackFrame,
+    currentDirectoryFileUrl: string
   ): Promise<TurbopackStackFrame | null>
 
   updateInfoSubscribe(

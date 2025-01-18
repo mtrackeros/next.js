@@ -1,7 +1,10 @@
 use anyhow::Result;
 use mime_guess::mime::TEXT_HTML_UTF_8;
+use serde::{Deserialize, Serialize};
 use turbo_rcstr::RcStr;
-use turbo_tasks::{ReadRef, ResolvedVc, TryJoinIterExt, Value, Vc};
+use turbo_tasks::{
+    trace::TraceRawVcs, NonLocalValue, ReadRef, ResolvedVc, TaskInput, TryJoinIterExt, Value, Vc,
+};
 use turbo_tasks_fs::{File, FileSystemPath};
 use turbo_tasks_hash::{encode_hex, Xxh3Hash64Hasher};
 use turbopack_core::{
@@ -12,17 +15,20 @@ use turbopack_core::{
     },
     ident::AssetIdent,
     module::Module,
+    module_graph::ModuleGraph,
     output::{OutputAsset, OutputAssets},
     version::{Version, VersionedContent},
 };
 
-// TODO(WEB-945) This should become a struct once we have a
-// `turbo_tasks::input` attribute macro/`Input` derive macro.
-type DevHtmlEntry = (
-    ResolvedVc<Box<dyn ChunkableModule>>,
-    Vc<Box<dyn ChunkingContext>>,
-    Option<Vc<EvaluatableAssets>>,
-);
+#[derive(
+    Clone, Debug, Deserialize, Eq, Hash, NonLocalValue, PartialEq, Serialize, TaskInput, TraceRawVcs,
+)]
+pub struct DevHtmlEntry {
+    pub chunkable_module: ResolvedVc<Box<dyn ChunkableModule>>,
+    pub module_graph: ResolvedVc<ModuleGraph>,
+    pub chunking_context: ResolvedVc<Box<dyn ChunkingContext>>,
+    pub runtime_entries: Option<ResolvedVc<EvaluatableAssets>>,
+}
 
 /// The HTML entry point of the dev server.
 ///
@@ -30,7 +36,7 @@ type DevHtmlEntry = (
 #[turbo_tasks::value(shared)]
 #[derive(Clone)]
 pub struct DevHtmlAsset {
-    path: Vc<FileSystemPath>,
+    path: ResolvedVc<FileSystemPath>,
     entries: Vec<DevHtmlEntry>,
     body: Option<RcStr>,
 }
@@ -44,7 +50,7 @@ fn dev_html_chunk_reference_description() -> Vc<RcStr> {
 impl OutputAsset for DevHtmlAsset {
     #[turbo_tasks::function]
     fn ident(&self) -> Vc<AssetIdent> {
-        AssetIdent::from_path(self.path)
+        AssetIdent::from_path(*self.path)
     }
 
     #[turbo_tasks::function]
@@ -68,7 +74,7 @@ impl Asset for DevHtmlAsset {
 
 impl DevHtmlAsset {
     /// Create a new dev HTML asset.
-    pub fn new(path: Vc<FileSystemPath>, entries: Vec<DevHtmlEntry>) -> Vc<Self> {
+    pub fn new(path: ResolvedVc<FileSystemPath>, entries: Vec<DevHtmlEntry>) -> Vc<Self> {
         DevHtmlAsset {
             path,
             entries,
@@ -79,7 +85,7 @@ impl DevHtmlAsset {
 
     /// Create a new dev HTML asset.
     pub fn new_with_body(
-        path: Vc<FileSystemPath>,
+        path: ResolvedVc<FileSystemPath>,
         entries: Vec<DevHtmlEntry>,
         body: RcStr,
     ) -> Vc<Self> {
@@ -95,7 +101,7 @@ impl DevHtmlAsset {
 #[turbo_tasks::value_impl]
 impl DevHtmlAsset {
     #[turbo_tasks::function]
-    pub async fn with_path(self: Vc<Self>, path: Vc<FileSystemPath>) -> Result<Vc<Self>> {
+    pub async fn with_path(self: Vc<Self>, path: ResolvedVc<FileSystemPath>) -> Result<Vc<Self>> {
         let mut html: DevHtmlAsset = self.await?.clone_value();
         html.path = path;
         Ok(html.cell())
@@ -132,23 +138,35 @@ impl DevHtmlAsset {
             .entries
             .iter()
             .map(|entry| async move {
-                let &(chunkable_module, chunking_context, runtime_entries) = entry;
+                let &DevHtmlEntry {
+                    chunkable_module,
+                    chunking_context,
+                    module_graph,
+                    runtime_entries,
+                } = entry;
 
                 let assets = if let Some(runtime_entries) = runtime_entries {
                     let runtime_entries = if let Some(evaluatable) =
                         ResolvedVc::try_downcast(chunkable_module).await?
                     {
-                        runtime_entries.with_entry(*evaluatable)
+                        runtime_entries
+                            .with_entry(*evaluatable)
+                            .to_resolved()
+                            .await?
                     } else {
                         runtime_entries
                     };
                     chunking_context.evaluated_chunk_group_assets(
                         chunkable_module.ident(),
-                        runtime_entries,
+                        *runtime_entries,
+                        *module_graph,
                         Value::new(AvailabilityInfo::Root),
                     )
                 } else {
-                    chunking_context.root_chunk_group_assets(*ResolvedVc::upcast(chunkable_module))
+                    chunking_context.root_chunk_group_assets(
+                        *ResolvedVc::upcast(chunkable_module),
+                        *module_graph,
+                    )
                 };
 
                 assets.await
@@ -164,7 +182,7 @@ impl DevHtmlAsset {
     }
 }
 
-#[turbo_tasks::value]
+#[turbo_tasks::value(operation)]
 struct DevHtmlAssetContent {
     chunk_paths: Vec<RcStr>,
     body: Option<RcStr>,
@@ -234,7 +252,7 @@ impl VersionedContent for DevHtmlAssetContent {
     }
 }
 
-#[turbo_tasks::value]
+#[turbo_tasks::value(operation)]
 struct DevHtmlAssetVersion {
     content: ReadRef<DevHtmlAssetContent>,
 }

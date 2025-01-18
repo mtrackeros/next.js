@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use turbo_rcstr::RcStr;
 use turbo_tasks::{FxIndexMap, ResolvedVc, Value, Vc};
 use turbo_tasks_env::{EnvMap, ProcessEnv};
-use turbo_tasks_fs::{FileSystem, FileSystemPath};
+use turbo_tasks_fs::FileSystemPath;
 use turbopack::{
     module_options::{
         CssOptionsContext, EcmascriptOptionsContext, JsxTransformOptions, ModuleOptionsContext,
@@ -19,7 +19,6 @@ use turbopack_core::{
         CompileTimeDefineValue, CompileTimeDefines, CompileTimeInfo, DefineableNameSegment,
         FreeVarReferences,
     },
-    condition::ContextCondition,
     environment::{
         Environment, ExecutionEnvironment, NodeJsEnvironment, NodeJsVersion, RuntimeVersions,
     },
@@ -41,7 +40,6 @@ use super::{
     transforms::{get_next_server_internal_transforms_rules, get_next_server_transforms_rules},
 };
 use crate::{
-    embed_js::next_js_fs,
     mode::NextMode,
     next_build::get_postcss_package_mapping,
     next_client::RuntimeEntries,
@@ -71,8 +69,8 @@ use crate::{
         get_typescript_transform_options,
     },
     util::{
-        foreign_code_context_condition, get_transpiled_packages, load_next_js_templateon,
-        NextRuntime,
+        foreign_code_context_condition, get_transpiled_packages, internal_assets_conditions,
+        load_next_js_templateon, NextRuntime,
     },
 };
 
@@ -93,20 +91,20 @@ pub enum ServerContextType {
     },
     AppRSC {
         app_dir: ResolvedVc<FileSystemPath>,
-        ecmascript_client_reference_transition_name: Option<Vc<RcStr>>,
-        client_transition: Option<Vc<Box<dyn Transition>>>,
+        ecmascript_client_reference_transition_name: Option<ResolvedVc<RcStr>>,
+        client_transition: Option<ResolvedVc<Box<dyn Transition>>>,
     },
     AppRoute {
         app_dir: ResolvedVc<FileSystemPath>,
-        ecmascript_client_reference_transition_name: Option<Vc<RcStr>>,
+        ecmascript_client_reference_transition_name: Option<ResolvedVc<RcStr>>,
     },
     Middleware {
         app_dir: Option<ResolvedVc<FileSystemPath>>,
-        ecmascript_client_reference_transition_name: Option<Vc<RcStr>>,
+        ecmascript_client_reference_transition_name: Option<ResolvedVc<RcStr>>,
     },
     Instrumentation {
         app_dir: Option<ResolvedVc<FileSystemPath>>,
-        ecmascript_client_reference_transition_name: Option<Vc<RcStr>>,
+        ecmascript_client_reference_transition_name: Option<ResolvedVc<RcStr>>,
     },
 }
 
@@ -376,36 +374,24 @@ pub async fn get_server_compile_time_info(
     define_env: Vc<EnvMap>,
     cwd: RcStr,
 ) -> Result<Vc<CompileTimeInfo>> {
-    Ok(CompileTimeInfo::builder(Environment::new(Value::new(
-        ExecutionEnvironment::NodeJsLambda(
+    CompileTimeInfo::builder(
+        Environment::new(Value::new(ExecutionEnvironment::NodeJsLambda(
             NodeJsEnvironment {
-                compile_target: CompileTarget::current(),
-                node_version: NodeJsVersion::cell(NodeJsVersion::Current(
+                compile_target: CompileTarget::current().to_resolved().await?,
+                node_version: NodeJsVersion::resolved_cell(NodeJsVersion::Current(
                     process_env.to_resolved().await?,
                 )),
-                cwd: Vc::cell(Some(cwd)),
+                cwd: ResolvedVc::cell(Some(cwd)),
             }
-            .cell(),
-        ),
-    )))
-    .defines(next_server_defines(define_env))
-    .free_var_references(next_server_free_vars(define_env))
-    .cell())
-}
-
-/// Determins if the module is an internal asset (i.e overlay, fallback) coming
-/// from the embedded FS, don't apply user defined transforms.
-///
-/// [TODO] turbopack specific embed fs should be handled by internals of
-/// turbopack itself and user config should not try to leak this. However,
-/// currently we apply few transform options subject to next.js's configuration
-/// even if it's embedded assets.
-fn internal_assets_conditions() -> ContextCondition {
-    ContextCondition::any(vec![
-        ContextCondition::InPath(next_js_fs().root()),
-        ContextCondition::InPath(turbopack_ecmascript_runtime::embed_fs().root()),
-        ContextCondition::InPath(turbopack_node::embed_js::embed_fs().root()),
-    ])
+            .resolved_cell(),
+        )))
+        .to_resolved()
+        .await?,
+    )
+    .defines(next_server_defines(define_env).to_resolved().await?)
+    .free_var_references(next_server_free_vars(define_env).to_resolved().await?)
+    .cell()
+    .await
 }
 
 #[turbo_tasks::function]
@@ -416,14 +402,27 @@ pub async fn get_server_module_options_context(
     mode: Vc<NextMode>,
     next_config: Vc<NextConfig>,
     next_runtime: NextRuntime,
+    encryption_key: ResolvedVc<RcStr>,
 ) -> Result<Vc<ModuleOptionsContext>> {
     let next_mode = mode.await?;
-    let mut next_server_rules =
-        get_next_server_transforms_rules(next_config, ty.into_value(), mode, false, next_runtime)
-            .await?;
-    let mut foreign_next_server_rules =
-        get_next_server_transforms_rules(next_config, ty.into_value(), mode, true, next_runtime)
-            .await?;
+    let mut next_server_rules = get_next_server_transforms_rules(
+        next_config,
+        ty.into_value(),
+        mode,
+        false,
+        next_runtime,
+        encryption_key,
+    )
+    .await?;
+    let mut foreign_next_server_rules = get_next_server_transforms_rules(
+        next_config,
+        ty.into_value(),
+        mode,
+        true,
+        next_runtime,
+        encryption_key,
+    )
+    .await?;
     let mut internal_custom_rules = get_next_server_internal_transforms_rules(
         ty.into_value(),
         next_config.mdx_rs().await?.is_some(),
@@ -632,7 +631,7 @@ pub async fn get_server_module_options_context(
                         foreign_code_module_options_context.resolved_cell(),
                     ),
                     (
-                        internal_assets_conditions(),
+                        internal_assets_conditions().await?,
                         internal_module_options_context.resolved_cell(),
                     ),
                 ],
@@ -697,7 +696,7 @@ pub async fn get_server_module_options_context(
                         foreign_code_module_options_context.resolved_cell(),
                     ),
                     (
-                        internal_assets_conditions(),
+                        internal_assets_conditions().await?,
                         internal_module_options_context.resolved_cell(),
                     ),
                 ],
@@ -721,7 +720,7 @@ pub async fn get_server_module_options_context(
             {
                 custom_source_transform_rules.push(get_ecma_transform_rule(
                     Box::new(ClientDirectiveTransformer::new(
-                        ecmascript_client_reference_transition_name,
+                        *ecmascript_client_reference_transition_name,
                     )),
                     enable_mdx_rs.is_some(),
                     true,
@@ -773,7 +772,7 @@ pub async fn get_server_module_options_context(
                         foreign_code_module_options_context.resolved_cell(),
                     ),
                     (
-                        internal_assets_conditions(),
+                        internal_assets_conditions().await?,
                         internal_module_options_context.resolved_cell(),
                     ),
                 ],
@@ -797,7 +796,7 @@ pub async fn get_server_module_options_context(
             {
                 common_next_server_rules.push(get_ecma_transform_rule(
                     Box::new(ClientDirectiveTransformer::new(
-                        ecmascript_client_reference_transition_name,
+                        *ecmascript_client_reference_transition_name,
                     )),
                     enable_mdx_rs.is_some(),
                     true,
@@ -848,7 +847,7 @@ pub async fn get_server_module_options_context(
                         foreign_code_module_options_context.resolved_cell(),
                     ),
                     (
-                        internal_assets_conditions(),
+                        internal_assets_conditions().await?,
                         internal_module_options_context.resolved_cell(),
                     ),
                 ],
@@ -875,7 +874,7 @@ pub async fn get_server_module_options_context(
             {
                 custom_source_transform_rules.push(get_ecma_transform_rule(
                     Box::new(ClientDirectiveTransformer::new(
-                        ecmascript_client_reference_transition_name,
+                        *ecmascript_client_reference_transition_name,
                     )),
                     enable_mdx_rs.is_some(),
                     true,
@@ -945,7 +944,7 @@ pub async fn get_server_module_options_context(
                         foreign_code_module_options_context.resolved_cell(),
                     ),
                     (
-                        internal_assets_conditions(),
+                        internal_assets_conditions().await?,
                         internal_module_options_context.resolved_cell(),
                     ),
                 ],
@@ -971,12 +970,13 @@ pub fn get_server_runtime_entries(
 #[turbo_tasks::function]
 pub async fn get_server_chunking_context_with_client_assets(
     mode: Vc<NextMode>,
-    project_path: Vc<FileSystemPath>,
-    node_root: Vc<FileSystemPath>,
-    client_root: Vc<FileSystemPath>,
-    asset_prefix: Vc<Option<RcStr>>,
-    environment: Vc<Environment>,
-    module_id_strategy: Vc<Box<dyn ModuleIdStrategy>>,
+    root_path: ResolvedVc<FileSystemPath>,
+    node_root: ResolvedVc<FileSystemPath>,
+    node_root_to_root_path: ResolvedVc<RcStr>,
+    client_root: ResolvedVc<FileSystemPath>,
+    asset_prefix: ResolvedVc<Option<RcStr>>,
+    environment: ResolvedVc<Environment>,
+    module_id_strategy: ResolvedVc<Box<dyn ModuleIdStrategy>>,
     turbo_minify: Vc<bool>,
 ) -> Result<Vc<NodeJsChunkingContext>> {
     let next_mode = mode.await?;
@@ -984,11 +984,18 @@ pub async fn get_server_chunking_context_with_client_assets(
     // different server chunking contexts. OR the build chunking context should
     // support both production and development modes.
     let mut builder = NodeJsChunkingContext::builder(
-        project_path,
+        root_path,
         node_root,
+        node_root_to_root_path,
         client_root,
-        node_root.join("server/chunks/ssr".into()),
-        client_root.join("static/media".into()),
+        node_root
+            .join("server/chunks/ssr".into())
+            .to_resolved()
+            .await?,
+        client_root
+            .join("static/media".into())
+            .to_resolved()
+            .await?,
         environment,
         next_mode.runtime_type(),
     )
@@ -1010,10 +1017,11 @@ pub async fn get_server_chunking_context_with_client_assets(
 #[turbo_tasks::function]
 pub async fn get_server_chunking_context(
     mode: Vc<NextMode>,
-    project_path: Vc<FileSystemPath>,
-    node_root: Vc<FileSystemPath>,
-    environment: Vc<Environment>,
-    module_id_strategy: Vc<Box<dyn ModuleIdStrategy>>,
+    root_path: ResolvedVc<FileSystemPath>,
+    node_root: ResolvedVc<FileSystemPath>,
+    node_root_to_root_path: ResolvedVc<RcStr>,
+    environment: ResolvedVc<Environment>,
+    module_id_strategy: ResolvedVc<Box<dyn ModuleIdStrategy>>,
     turbo_minify: Vc<bool>,
 ) -> Result<Vc<NodeJsChunkingContext>> {
     let next_mode = mode.await?;
@@ -1021,11 +1029,12 @@ pub async fn get_server_chunking_context(
     // different server chunking contexts. OR the build chunking context should
     // support both production and development modes.
     let mut builder = NodeJsChunkingContext::builder(
-        project_path,
+        root_path,
         node_root,
+        node_root_to_root_path,
         node_root,
-        node_root.join("server/chunks".into()),
-        node_root.join("server/assets".into()),
+        node_root.join("server/chunks".into()).to_resolved().await?,
+        node_root.join("server/assets".into()).to_resolved().await?,
         environment,
         next_mode.runtime_type(),
     )

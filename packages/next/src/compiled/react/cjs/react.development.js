@@ -399,7 +399,7 @@
       if ("object" === typeof type)
         switch (type.$$typeof) {
           case REACT_FORWARD_REF_TYPE:
-            return (type = describeNativeComponentFrame(type.render, !1)), type;
+            return describeNativeComponentFrame(type.render, !1);
           case REACT_MEMO_TYPE:
             return describeUnknownElementTypeFrameInDEV(type.type);
           case REACT_LAZY_TYPE:
@@ -1029,6 +1029,12 @@
               });
             }
           : enqueueTask;
+    deprecatedAPIs = Object.freeze({
+      __proto__: null,
+      c: function (size) {
+        return resolveDispatcher().useMemoCache(size);
+      }
+    });
     exports.Children = {
       map: mapChildren,
       forEach: function (children, forEachFunc, forEachContext) {
@@ -1070,11 +1076,7 @@
     exports.Suspense = REACT_SUSPENSE_TYPE;
     exports.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE =
       ReactSharedInternals;
-    exports.__COMPILER_RUNTIME = {
-      c: function (size) {
-        return resolveDispatcher().useMemoCache(size);
-      }
-    };
+    exports.__COMPILER_RUNTIME = deprecatedAPIs;
     exports.act = function (callback) {
       var prevActQueue = ReactSharedInternals.actQueue,
         prevActScopeDepth = actScopeDepth;
@@ -1518,7 +1520,7 @@
     exports.useTransition = function () {
       return resolveDispatcher().useTransition();
     };
-    exports.version = "19.0.0-rc-b01722d5-20241114";
+    exports.version = "19.1.0-canary-5b51a2b9-20250116";
     "undefined" !== typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ &&
       "function" ===
         typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStop &&

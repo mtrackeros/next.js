@@ -12,12 +12,13 @@ use swc_core::{
 };
 use turbo_rcstr::RcStr;
 use turbo_tasks::{
-    debug::ValueDebugFormat, trace::TraceRawVcs, ReadRef, ResolvedVc, TryJoinIterExt, Value,
-    ValueToString, Vc,
+    debug::ValueDebugFormat, trace::TraceRawVcs, NonLocalValue, ReadRef, ResolvedVc,
+    TryJoinIterExt, Value, ValueToString, Vc,
 };
 use turbopack_core::{
     chunk::{ChunkableModuleReference, ChunkingContext},
     issue::IssueSource,
+    module_graph::ModuleGraph,
     reference::ModuleReference,
     resolve::{origin::ResolveOrigin, parse::Request, ModuleResolveResult},
 };
@@ -83,10 +84,20 @@ impl ValueToString for AmdDefineAssetReference {
 #[turbo_tasks::value_impl]
 impl ChunkableModuleReference for AmdDefineAssetReference {}
 
-#[derive(ValueDebugFormat, Debug, PartialEq, Eq, Serialize, Deserialize, TraceRawVcs, Clone)]
+#[derive(
+    ValueDebugFormat,
+    Debug,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    TraceRawVcs,
+    Clone,
+    NonLocalValue,
+)]
 pub enum AmdDefineDependencyElement {
     Request {
-        request: Vc<Request>,
+        request: ResolvedVc<Request>,
         request_str: String,
     },
     Exports,
@@ -95,7 +106,16 @@ pub enum AmdDefineDependencyElement {
 }
 
 #[derive(
-    ValueDebugFormat, Debug, PartialEq, Eq, Serialize, Deserialize, TraceRawVcs, Copy, Clone,
+    ValueDebugFormat,
+    Debug,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    TraceRawVcs,
+    Copy,
+    Clone,
+    NonLocalValue,
 )]
 pub enum AmdDefineFactoryType {
     Unknown,
@@ -107,20 +127,20 @@ pub enum AmdDefineFactoryType {
 #[derive(Debug)]
 pub struct AmdDefineWithDependenciesCodeGen {
     dependencies_requests: Vec<AmdDefineDependencyElement>,
-    origin: Vc<Box<dyn ResolveOrigin>>,
+    origin: ResolvedVc<Box<dyn ResolveOrigin>>,
     path: ResolvedVc<AstPath>,
     factory_type: AmdDefineFactoryType,
-    issue_source: Vc<IssueSource>,
+    issue_source: ResolvedVc<IssueSource>,
     in_try: bool,
 }
 
 impl AmdDefineWithDependenciesCodeGen {
     pub fn new(
         dependencies_requests: Vec<AmdDefineDependencyElement>,
-        origin: Vc<Box<dyn ResolveOrigin>>,
+        origin: ResolvedVc<Box<dyn ResolveOrigin>>,
         path: ResolvedVc<AstPath>,
         factory_type: AmdDefineFactoryType,
-        issue_source: Vc<IssueSource>,
+        issue_source: ResolvedVc<IssueSource>,
         in_try: bool,
     ) -> Vc<Self> {
         Self::cell(AmdDefineWithDependenciesCodeGen {
@@ -139,6 +159,7 @@ impl CodeGenerateable for AmdDefineWithDependenciesCodeGen {
     #[turbo_tasks::function]
     async fn code_generation(
         &self,
+        module_graph: Vc<ModuleGraph>,
         chunking_context: Vc<Box<dyn ChunkingContext>>,
     ) -> Result<Vc<CodeGeneration>> {
         let mut visitors = Vec::new();
@@ -153,13 +174,14 @@ impl CodeGenerateable for AmdDefineWithDependenciesCodeGen {
                         request_str,
                     } => ResolvedElement::PatternMapping {
                         pattern_mapping: PatternMapping::resolve_request(
-                            *request,
-                            self.origin,
+                            **request,
+                            *self.origin,
+                            module_graph,
                             Vc::upcast(chunking_context),
                             cjs_resolve(
-                                self.origin,
-                                *request,
-                                Some(self.issue_source),
+                                *self.origin,
+                                **request,
+                                Some(*self.issue_source),
                                 self.in_try,
                             ),
                             Value::new(ChunkItem),
